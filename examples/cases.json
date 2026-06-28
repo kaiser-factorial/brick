@@ -1,0 +1,32 @@
+[
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://developers.google.com/identity/protocols/oauth2/native-app", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://github.com/kaiser-factorial/ledger/issues", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://stackoverflow.com/questions/tagged/oauth-2.0", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://www.reddit.com/r/all", "expected": "block" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://www.netflix.com/browse", "expected": "block" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://news.ycombinator.com", "expected": "block" },
+
+  { "task": "Write the BRICK MODE adjudicator prototype in TypeScript", "url": "https://docs.anthropic.com/en/api/messages", "expected": "allow" },
+  { "task": "Write the BRICK MODE adjudicator prototype in TypeScript", "url": "https://www.typescriptlang.org/docs/handbook/utility-types.html", "expected": "allow" },
+  { "task": "Write the BRICK MODE adjudicator prototype in TypeScript", "url": "https://www.instagram.com/", "expected": "block" },
+  { "task": "Write the BRICK MODE adjudicator prototype in TypeScript", "url": "https://www.youtube.com/feed/trending", "expected": "block" },
+
+  { "task": "Prepare the Q3 VAT return", "url": "https://www.gov.uk/vat-returns", "expected": "allow" },
+  { "task": "Prepare the Q3 VAT return", "url": "https://x.com/home", "expected": "block" },
+
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://www.youtube.com/watch?v=996OiexHze0", "title": "OAuth 2.0 explained: redirect URIs, PKCE, and the auth code flow", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://www.youtube.com/watch?v=5qap5aO4i9A", "title": "lofi hip hop radio - beats to relax/study to", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://en.wikipedia.org/wiki/OAuth", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://en.wikipedia.org/wiki/Taylor_Swift", "expected": "block" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://x.com/OktaDev/status/1700000000000000000", "title": "Thread: why your OAuth redirect_uri keeps mismatching on localhost", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://stackoverflow.com/questions/19316873/how-to-center-a-div", "title": "How do I center a div horizontally?", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://news.ycombinator.com/item?id=38000000", "title": "Show HN: a tiny OAuth2 PKCE helper for desktop apps", "expected": "allow" },
+  { "task": "Fix the OAuth redirect bug in the ledger desktop build", "url": "https://www.reddit.com/r/oauth/comments/abc/redirect_uri_mismatch_on_localhost", "title": "redirect_uri mismatch on localhost — how I fixed it", "expected": "allow" },
+
+  { "task": "Write the BRICK MODE adjudicator prototype in TypeScript", "url": "https://github.com/anthropics/anthropic-sdk-typescript", "expected": "allow" },
+  { "task": "Write the BRICK MODE adjudicator prototype in TypeScript", "url": "https://www.reddit.com/r/typescript/comments/xyz/forced_tool_use_vs_structured_outputs", "title": "forced tool use vs structured outputs for guaranteed JSON?", "expected": "allow" },
+  { "task": "Write the BRICK MODE adjudicator prototype in TypeScript", "url": "https://www.youtube.com/watch?v=abcd1234", "title": "I tried living like a medieval peasant for a week", "expected": "block" },
+
+  { "task": "Draft the Q3 board update memo", "url": "https://docs.google.com/document/d/1a2b3c/edit", "expected": "allow" },
+  { "task": "Draft the Q3 board update memo", "url": "https://www.linkedin.com/feed/", "expected": "block" }
+]

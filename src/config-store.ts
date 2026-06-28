@@ -1,0 +1,56 @@
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { DEFAULT_TIERS } from "./tiers.js";
+import type { TierConfig } from "./tiers.js";
+
+const DATA_DIR =
+  process.env.BRICK_DATA_DIR ?? fileURLToPath(new URL("../.data/", import.meta.url));
+const TIERS_PATH = join(DATA_DIR, "tiers.json");
+
+const MAX_ENTRIES = 1000; // bound the persisted lists (defends the write endpoint)
+
+function normalize(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  return [
+    ...new Set(
+      list
+        .slice(0, MAX_ENTRIES)
+        .map((s) => String(s).trim().toLowerCase().slice(0, 253))
+        .filter(Boolean)
+        .map((s) => s.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "")),
+    ),
+  ];
+}
+
+/** Load persisted tier config (`.data/tiers.json`), falling back to the built-in defaults. */
+export async function loadTiers(): Promise<TierConfig> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(TIERS_PATH, "utf8"));
+    if (parsed && typeof parsed === "object") {
+      const p = parsed as { tier1?: unknown; tier3?: unknown };
+      return { tier1: normalize(p.tier1), tier3: normalize(p.tier3) };
+    }
+  } catch {
+    /* no/invalid file → defaults */
+  }
+  return { tier1: [...DEFAULT_TIERS.tier1], tier3: [...DEFAULT_TIERS.tier3] };
+}
+
+/** Delete the persisted tier config, reverting to built-in defaults. Returns the defaults. */
+export async function resetTiers(): Promise<TierConfig> {
+  try {
+    await unlink(TIERS_PATH);
+  } catch {
+    /* file may not exist — fine */
+  }
+  return { tier1: [...DEFAULT_TIERS.tier1], tier3: [...DEFAULT_TIERS.tier3] };
+}
+
+/** Persist (and normalize) a tier config. Returns the cleaned config. */
+export async function saveTiers(cfg: { tier1?: unknown; tier3?: unknown }): Promise<TierConfig> {
+  const clean: TierConfig = { tier1: normalize(cfg.tier1), tier3: normalize(cfg.tier3) };
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(TIERS_PATH, JSON.stringify(clean, null, 2), "utf8");
+  return clean;
+}

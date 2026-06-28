@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root { --bg:#0a0f0a; --fg:#6ee7a8; --dim:#2f6f4e; --red:#ff6b6b; --line:#173b29; --amber:#d9a441; }
+      * { box-sizing: border-box; }
+      body { width: 320px; margin: 0; background: var(--bg); color: var(--fg);
+        font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 14px; }
+      .brick { letter-spacing: 0.35em; color: var(--red); font-weight: 700; font-size: 12px; margin-bottom: 10px; }
+      .label { color: var(--dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; margin: 10px 0 4px; }
+      select, input { width: 100%; background: #06180f; color: var(--fg); border: 1px solid var(--line);
+        border-radius: 3px; padding: 7px; font: inherit; }
+      .row2 { display: flex; gap: 8px; }
+      .row2 > div { flex: 1; }
+      button { width: 100%; margin-top: 14px; background: transparent; color: var(--fg);
+        border: 1px solid var(--fg); border-radius: 3px; padding: 9px; font: inherit; cursor: pointer; }
+      button:hover { background: var(--fg); color: var(--bg); }
+      button.stop { color: var(--red); border-color: var(--red); }
+      button.stop:hover { background: var(--red); color: var(--bg); }
+      .timer { font-size: 2.2rem; text-align: center; margin: 8px 0; letter-spacing: 0.05em; }
+      .phase { text-align: center; color: var(--dim); text-transform: uppercase; letter-spacing: 0.2em; font-size: 0.75rem; }
+      .focus { font-size: 1.05rem; margin: 6px 0; }
+      .muted { color: var(--dim); font-size: 0.72rem; }
+      .warn { color: var(--amber); font-size: 0.72rem; margin-top: 8px; }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="brick">■ BRICK MODE</div>
+
+    <!-- No active session: the focus picker -->
+    <div id="picker">
+      <div class="label">Project</div>
+      <select id="project"></select>
+      <div class="label">…or free-typed focus</div>
+      <input id="task" type="text" placeholder="e.g. Prepare the Q3 VAT return" />
+      <div class="row2">
+        <div>
+          <div class="label">Work min</div>
+          <input id="work" type="number" value="25" min="1" />
+        </div>
+        <div>
+          <div class="label">Break min</div>
+          <input id="break" type="number" value="5" min="1" />
+        </div>
+      </div>
+      <button id="start">▶ start focus session</button>
+      <div id="warn" class="warn"></div>
+    </div>
+
+    <!-- Active session -->
+    <div id="active" class="hidden">
+      <div class="phase" id="phase">work</div>
+      <div class="timer" id="timer">25:00</div>
+      <div class="label">Focus</div>
+      <div class="focus" id="afocus">…</div>
+      <div class="muted" id="stats"></div>
+      <button id="stop" class="stop">■ end session</button>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

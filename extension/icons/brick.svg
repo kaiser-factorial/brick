@@ -1,0 +1,40 @@
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- Full-bleed yellow running-bond brick wall. Mortar (amber) fills the gaps; no white background. -->
+  <rect width="128" height="128" fill="#E6A836"/>
+  <g fill="#FBD962" stroke="#ECC04C" stroke-width="1.2">
+    <rect x="-21" y="-9" width="42" height="18" rx="2.5"/>
+    <rect x="25" y="-9" width="42" height="18" rx="2.5"/>
+    <rect x="71" y="-9" width="42" height="18" rx="2.5"/>
+    <rect x="117" y="-9" width="42" height="18" rx="2.5"/>
+
+    <rect x="-44" y="13" width="42" height="18" rx="2.5"/>
+    <rect x="2" y="13" width="42" height="18" rx="2.5"/>
+    <rect x="48" y="13" width="42" height="18" rx="2.5"/>
+    <rect x="94" y="13" width="42" height="18" rx="2.5"/>
+
+    <rect x="-21" y="35" width="42" height="18" rx="2.5"/>
+    <rect x="25" y="35" width="42" height="18" rx="2.5"/>
+    <rect x="71" y="35" width="42" height="18" rx="2.5"/>
+    <rect x="117" y="35" width="42" height="18" rx="2.5"/>
+
+    <rect x="-44" y="57" width="42" height="18" rx="2.5"/>
+    <rect x="2" y="57" width="42" height="18" rx="2.5"/>
+    <rect x="48" y="57" width="42" height="18" rx="2.5"/>
+    <rect x="94" y="57" width="42" height="18" rx="2.5"/>
+
+    <rect x="-21" y="79" width="42" height="18" rx="2.5"/>
+    <rect x="25" y="79" width="42" height="18" rx="2.5"/>
+    <rect x="71" y="79" width="42" height="18" rx="2.5"/>
+    <rect x="117" y="79" width="42" height="18" rx="2.5"/>
+
+    <rect x="-44" y="101" width="42" height="18" rx="2.5"/>
+    <rect x="2" y="101" width="42" height="18" rx="2.5"/>
+    <rect x="48" y="101" width="42" height="18" rx="2.5"/>
+    <rect x="94" y="101" width="42" height="18" rx="2.5"/>
+
+    <rect x="-21" y="123" width="42" height="18" rx="2.5"/>
+    <rect x="25" y="123" width="42" height="18" rx="2.5"/>
+    <rect x="71" y="123" width="42" height="18" rx="2.5"/>
+    <rect x="117" y="123" width="42" height="18" rx="2.5"/>
+  </g>
+</svg>

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>BRICK MODE — settings</title>
+    <style>
+      :root { --bg:#0a0f0a; --fg:#6ee7a8; --dim:#2f6f4e; --red:#ff6b6b; --line:#173b29; --amber:#d9a441; }
+      body { background: var(--bg); color: var(--fg); font: 14px ui-monospace, Menlo, monospace;
+        max-width: 640px; margin: 0 auto; padding: 32px 24px; }
+      .brick { letter-spacing: 0.35em; color: var(--red); font-weight: 700; }
+      h2 { border-bottom: 1px solid var(--line); padding-bottom: 6px; margin-top: 28px; font-size: 1rem; }
+      ul { list-style: none; padding: 0; }
+      li { padding: 3px 0; }
+      .tier1 li::before { content: "■ "; color: var(--red); }
+      .tier3 li::before { content: "● "; color: var(--fg); }
+      .status { margin-top: 8px; }
+      .ok { color: var(--fg); }
+      .bad { color: var(--red); }
+      .warn { color: var(--amber); }
+      .muted { color: var(--dim); font-size: 0.8rem; }
+      textarea { width: 100%; background: #06180f; color: var(--fg); border: 1px solid var(--line);
+        border-radius: 3px; padding: 8px; font: inherit; resize: vertical; }
+      button { margin-top: 12px; background: transparent; color: var(--fg); border: 1px solid var(--fg);
+        border-radius: 3px; padding: 8px 16px; font: inherit; cursor: pointer; }
+      button:hover { background: var(--fg); color: var(--bg); }
+      #saved { margin-left: 10px; }
+    </style>
+  </head>
+  <body>
+    <div class="brick">■ BRICK MODE — settings</div>
+
+    <h2>Service</h2>
+    <div class="status" id="status">checking 127.0.0.1:7373 …</div>
+
+    <h2>Tier 1 — always blocked</h2>
+    <textarea id="tier1" rows="9" spellcheck="false" placeholder="one domain per line, e.g. reddit.com"></textarea>
+
+    <h2>Tier 3 — always allowed</h2>
+    <textarea id="tier3" rows="7" spellcheck="false"></textarea>
+
+    <div>
+      <button id="save">save tier lists</button>
+      <button id="reset" style="margin-left:8px;border-color:#ff6b6b;color:#ff6b6b">reset to defaults</button>
+      <span id="saved" class="muted"></span>
+    </div>
+
+    <p class="muted">
+      One domain per line. Everything not listed is Tier 2 — adjudicated against your focus task by
+      Claude Haiku 4.5. Saved to the local service (<code>.data/tiers.json</code>); a new focus
+      session picks up the changes.
+    </p>
+
+    <script src="options.js"></script>
+  </body>
+</html>
