@@ -17,6 +17,7 @@ import {
   focusKeyOf,
   resolvePrecedence,
 } from "../dist/decisions-store.js";
+import { loadCorpus, retrieveChunks } from "../dist/help.js";
 
 const PORT = process.env.SMOKE_PORT ?? "7399";
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -68,13 +69,42 @@ const cases06 = decisionsToCases([
 ]);
 check("0.6 decisionsToCases maps a correction to a scored case", cases06.length === 1 && cases06[0].task === "proj" && cases06[0].expected === "block" && cases06[0].url === "https://nytimes.com/x");
 
+// ---------- unit: help corpus + retrieval (Epic H1/H2) — key-free ----------
+const corpus = await loadCorpus();
+check("help corpus loads (≥20 chunks across ≥5 docs)",
+  corpus.length >= 20 && new Set(corpus.map((c) => c.doc)).size >= 5);
+// H1 AC: each supported how-to question maps to a relevant corpus chunk.
+const QMAP = [
+  ["How do I add a Tier-1 site?", "blocking-and-tiers.md"],
+  ["How do I change the adjudicator model?", "model-and-provider.md"],
+  ["What does the remember checkbox on the clarify card do?", "gatekeeper.md"],
+  ["Why is there a pause symbol on the badge?", null], // grace pause — sessions or getting-started
+  ["How do I turn on sound cues?", "sessions-and-feedback.md"],
+  ["Where does BRICK store its data?", "service-and-troubleshooting.md"],
+  ["How does the rabbit hole nudge work?", "gatekeeper.md"],
+];
+for (const [q, doc] of QMAP) {
+  const hits = retrieveChunks(q, corpus);
+  const ok = hits.length > 0 && (doc === null || hits.some((h) => h.doc === doc));
+  check(`retrieval: "${q}" → ${doc ?? "any"}`, ok);
+}
+
 // ---------- integration: the running service ----------
 let dataDir;
 let srv;
 try {
   dataDir = await mkdtemp(join(tmpdir(), "brick-smoke-"));
   srv = spawn("node", ["dist/server.js"], {
-    env: { ...process.env, BRICK_PORT: PORT, BRICK_DATA_DIR: dataDir },
+    // Blank both provider keys so the run is genuinely key-free (tier-2 takes the stub path and no
+    // check ever calls a model) even on a machine whose .env/environment has real keys. An
+    // empty-string var also blocks process.loadEnvFile from re-populating it (no override).
+    env: {
+      ...process.env,
+      BRICK_PORT: PORT,
+      BRICK_DATA_DIR: dataDir,
+      ANTHROPIC_API_KEY: "",
+      OPENROUTER_API_KEY: "",
+    },
     stdio: "ignore",
   });
 
@@ -155,6 +185,15 @@ try {
   const pv = await post("/adjudicate", { url: "https://youtube.com/watch?v=abc", task: TASK, unit: "abc" });
   check("page-scope learned allow short-circuits its video", pv.via === "learned" && pv.decision === "allow");
   await post("/decisions/clear");
+
+  // /help without a key → clean 503 with a helpful error (never a crash or invented answer).
+  const helpRes = await fetch(BASE + "/help", {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify({ question: "How do I add a Tier-1 site?" }),
+  });
+  const helpBody = await helpRes.json();
+  check("key-free /help degrades cleanly (503 + error)", helpRes.status === 503 && typeof helpBody.error === "string");
 
   // Session lifecycle (explicit focus — no ledger needed).
   const start = await post("/session/start", { task: TASK });

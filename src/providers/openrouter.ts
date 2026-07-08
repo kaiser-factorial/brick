@@ -1,5 +1,12 @@
 import OpenAI from "openai";
-import type { RawVerdict, VerdictProvider, VerdictRequest, VerdictResult } from "./provider.js";
+import type {
+  ChatRequest,
+  ChatResult,
+  RawVerdict,
+  VerdictProvider,
+  VerdictRequest,
+  VerdictResult,
+} from "./provider.js";
 
 let client: OpenAI | null = null;
 function getClient(): OpenAI {
@@ -65,5 +72,57 @@ export class OpenRouterProvider implements VerdictProvider {
     }
 
     return { verdict, text, modelUsed: response.model ?? req.model };
+  }
+
+  async chat(req: ChatRequest): Promise<ChatResult> {
+    const tools: OpenAI.Chat.ChatCompletionTool[] = (req.tools ?? []).map((t) => ({
+      type: "function" as const,
+      function: { name: t.name, description: t.description, parameters: t.schema },
+    }));
+    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+      { role: "system", content: req.system },
+      ...(req.history ?? []).map((h) => ({ role: h.role, content: h.content })),
+      { role: "user", content: req.user },
+    ];
+
+    // Internal tool loop (tool_choice auto) — mirrors the Anthropic provider; a few cheap rounds.
+    let modelUsed = req.model;
+    for (let round = 0; round < 4; round += 1) {
+      const response = await getClient().chat.completions.create({
+        model: req.model,
+        max_tokens: req.maxTokens ?? 1024,
+        messages,
+        ...(tools.length ? { tools } : {}),
+      });
+      modelUsed = response.model ?? req.model;
+      const msg = response.choices?.[0]?.message;
+      const calls = (msg?.tool_calls ?? []).filter(
+        (c): c is OpenAI.Chat.ChatCompletionMessageFunctionToolCall => c.type === "function",
+      );
+      if (!msg || !calls.length) {
+        return { text: typeof msg?.content === "string" ? msg.content : "", modelUsed };
+      }
+
+      messages.push(msg);
+      for (const call of calls) {
+        const tool = (req.tools ?? []).find((t) => t.name === call.function.name);
+        let out = `unknown tool: ${call.function.name}`;
+        if (tool) {
+          try {
+            let input: unknown = {};
+            try {
+              input = JSON.parse(call.function.arguments || "{}");
+            } catch {
+              /* malformed args → empty input */
+            }
+            out = await tool.run(input);
+          } catch (e) {
+            out = `tool error: ${e instanceof Error ? e.message : String(e)}`;
+          }
+        }
+        messages.push({ role: "tool", tool_call_id: call.id, content: out });
+      }
+    }
+    return { text: "(help agent: tool loop limit reached)", modelUsed };
   }
 }

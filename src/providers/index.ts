@@ -2,7 +2,17 @@ import type { VerdictProvider } from "./provider.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { OpenRouterProvider } from "./openrouter.js";
 
-export type { RawVerdict, VerdictProvider, VerdictRequest, VerdictResult, VerdictTool } from "./provider.js";
+export type {
+  ChatRequest,
+  ChatResult,
+  ChatTool,
+  ChatTurn,
+  RawVerdict,
+  VerdictProvider,
+  VerdictRequest,
+  VerdictResult,
+  VerdictTool,
+} from "./provider.js";
 
 /** Which provider is active. `BRICK_PROVIDER` wins if set; otherwise the default is `openrouter`,
  *  but we gracefully fall back to `anthropic` when only the Anthropic key is present — so an

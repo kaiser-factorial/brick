@@ -35,9 +35,41 @@ export interface VerdictResult {
   modelUsed: string;
 }
 
+/** A prior conversational turn (the help panel keeps a short history). */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** A read-only tool the model may call during a chat (Epic H4). The provider runs the internal
+ *  request→execute→continue loop itself, so each SDK keeps its own native message shapes. */
+export interface ChatTool {
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
+  run: (input: unknown) => Promise<string>;
+}
+
+export interface ChatRequest {
+  system: string;
+  user: string;
+  history?: ChatTurn[];
+  model: string;
+  maxTokens?: number;
+  /** Optional tools with tool_choice auto — used by the help agent's situated answers. */
+  tools?: ChatTool[];
+}
+
+export interface ChatResult {
+  text: string;
+  modelUsed: string;
+}
+
 export interface VerdictProvider {
   readonly name: "openrouter" | "anthropic";
   /** A sensible default model id for this provider, used when BRICK_MODEL is unset. */
   readonly defaultModel: string;
   recordVerdict(req: VerdictRequest): Promise<VerdictResult>;
+  /** Plain conversational completion (no forced tool) — the help agent's channel (Epic H). */
+  chat(req: ChatRequest): Promise<ChatResult>;
 }

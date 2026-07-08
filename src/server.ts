@@ -19,6 +19,8 @@ import {
   loadDecisions,
   resolvePrecedence,
 } from "./decisions-store.js";
+import { answerHelp } from "./help.js";
+import type { ChatTurn } from "./providers/index.js";
 import {
   endSession,
   getSession,
@@ -364,6 +366,33 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
     case "GET /decisions":
       return sendJson(res, 200, { decisions, counts: decisionCounts(decisions) });
+
+    case "POST /help": {
+      // Grounded usage Q&A (Epic H): answers only from the help/ corpus (+ read-only state tools).
+      const body = await readJson(req);
+      const question = str(body, "question");
+      if (!question) return sendJson(res, 400, { error: "question required" });
+      if (!hasApiKey()) {
+        return sendJson(res, 503, {
+          error: `no ${PROVIDER} API key — the help assistant needs the same key as adjudication`,
+        });
+      }
+      // Sanitize the optional short history the panel sends.
+      const history: ChatTurn[] = Array.isArray(body.history)
+        ? (body.history as Array<Record<string, unknown>>)
+            .filter(
+              (h) =>
+                h &&
+                (h.role === "user" || h.role === "assistant") &&
+                typeof h.content === "string" &&
+                h.content.trim(),
+            )
+            .slice(-6)
+            .map((h) => ({ role: h.role as "user" | "assistant", content: String(h.content).slice(0, 2000) }))
+        : [];
+      const result = await answerHelp(question.slice(0, 2000), history);
+      return sendJson(res, 200, result);
+    }
 
     case "POST /prepend": {
       const body = await readJson(req);
