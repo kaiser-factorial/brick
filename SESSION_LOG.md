@@ -515,3 +515,94 @@ Branch `workload-plan-layer` (off master post-merge of PR #1).
 **The plan layer is now A ✓ T ✓ B ✓ C ✓ — only Epic D (Ledger-native store) remains, which needs
 Corina's machine (ledger_root repos + Firestore creds).**
 
+## Code review + fix pass (2026-07-08)
+
+A thorough `/code-review high` over the entire day's diff (`fbacb4e...HEAD`, ~5.6k lines: the full
+early wave + plan layer) — 8 finder angles → 36 candidates → 16 adversarially verified → **15
+confirmed real bugs**. All fixed on this branch before merge. Two root causes explained most of the
+top findings:
+
+**Root cause 1 — service⇄extension sync only worked one direction.** Local enforcement (session
+anchor, Tier-1 DNR rules, alarms, badge) only re-synced when the EXTENSION initiated a plan change
+(its own message handlers called `adoptServiceSession`/`teardownLocal`). A SERVICE-initiated change
+— the watcher loop auto-advancing a block, an undo firing after a restart, the plan ending on its
+own — left the extension (and, separately, the service's own in-memory session after a restart)
+stale, with `/adjudicate` fail-open forever. **Fix:** `dispatchNotifications()` (renamed to run every
+tick regardless of who caused a change) now compares `planId`/`activeBlockId` against what it last
+knew and re-adopts/tears down on ANY drift — server- or extension-initiated, covering restarts too.
+`restorePlan()` now calls `anchorSession()` (it only re-armed watchers before). Extension handlers
+call a new `markPlanSynced()` right after their own adopt/teardown so the next tick's check is a
+no-op for the common case (no redundant re-adopt).
+
+**Root cause 2 — swap-fire dedup was a volatile Set, not persisted state.** The old `firedBlocks`
+Set (in-memory only) both (a) let a mere time-nudge permanently disarm a later condition fire under
+`swapMode:"first"`, and (b) evaporated on restart, so an undone block's still-met condition would
+auto-re-advance it minutes after the user said "not done." **Fix:** replaced with two independent,
+**persisted** per-block fields — `conditionFiredAt` / `timeFiredAt` — so a time nudge never blocks a
+later condition fire, and the undo-hold (stamped before the pre-advance snapshot is taken) survives
+a service restart. Repeat-block clones reset both fields fresh.
+
+**Other confirmed fixes, this branch:**
+- **Provider/model mismatch (V5):** a cross-provider model id (Anthropic-form on OpenRouter or vice
+  versa) 404s every call and, since adjudication fails open, silently disabled ALL Tier-2 blocking
+  forever with only a stderr line. `resolveModelForProvider()` now guards it — falls back to the
+  provider's own default with a loud warning instead of 404ing indefinitely.
+- **Provider-error observability (V14):** a fail-open from a provider outage was wire-identical to a
+  genuine model allow (same `stub:false`, no UI signal) — an outage looked like the tool working.
+  Added `providerError` on the result (surfaced on `/health.lastProviderError`); content-guard now
+  treats a `providerError` allow like a stub (skips the redundant phase-2 deepen call too).
+- **enforceTab missing the per-page unit (V6) / youtu.be path ids (V16b):** page-scope learned
+  decisions were invisible to the tab-activation/open-tab-sweep path, and youtu.be short links
+  (id in the path, not `?v=`) never got a unit at all. Fixed at the root: `derivePageUnit()` in
+  `decisions-store.ts` derives the unit **server-side** from the URL for both `/adjudicate` and
+  `/decisions/learn` whenever the caller omits one — one mechanism instead of asking every caller
+  to compute it correctly (content-guard's `learn()` now just says "this domain is page-scoped",
+  letting the server resolve the exact unit).
+- **Switch notification silently swallowed (V8):** was gated on the undo window still being open
+  by the time the next tick ran — a 30s window racing a 30-60s tick meant it often lost. Now fires
+  on any real block change within the same plan; the undo action is offered only when available.
+  (This also fixed the `TICK_ALARM` cadence flip-flopping — one constant `TICK_MINUTES = 0.5` always,
+  removing the 1min/0.5min split that `reconcile()` silently reintroduced mid-plan.)
+- **`advancePlan` accepted any blockId (V9):** advancing a *pending* block while another was active
+  stranded the active one forever (two "active" blocks). `advanceBlock` now rejects a non-active id.
+- **Budget-edit NaN/1-minute coercion (V10):** a missing or non-numeric `budgetMinutes` on
+  `/plan/reorder`'s budget edit silently became `1` or `NaN` (which read as instant "grace"
+  escalation). Now rejected with a clear error.
+- **Stop-condition plumbing gaps (V11):** `TemplateBlock` had no `stopConditions`/`advanceMode`/
+  `completionPolicy`, so save-as-template → relaunch silently stripped every watcher; `editPlan`'s
+  insert branch dropped the same fields even though its own input type declared them;
+  `completionPolicy:"all"` was unreachable through `/plan/start`. Fixed via one shared `mintBlock()`
+  constructor used by `startPlan` and `editPlan.insert`, template fields carried through
+  `liftPlanToTemplate`/`expandTemplate` (with a proper deep-clone per repeated instance — the
+  pattern-repeat loop was sharing one `stopConditions` array reference across all copies), and the
+  `/plan/start`+`/plan/reorder` body parsers now accept `completionPolicy`.
+- **Rabbit-hole 2× accrual (V7):** counted "1 minute per tick" but the tick period isn't always 1
+  minute (0.5 during plans) — now accrues by actual elapsed wall-clock time since the last
+  *consecutive* matching tick (resets on any gap or domain switch, so it never counts inactive time).
+- **Badge lost the break countdown during a plan (V12):** the plan branch always showed budget
+  minutes, even during a break. Now shows the real phase countdown on break, budget on work.
+- **`stopSession` ordering (V13):** re-ordered to tear down local enforcement (alarms/DNR/badge)
+  *before* the service call, matching the pre-plan-layer behavior — a wedged (not down) service can
+  no longer hold Tier-1 blocking open indefinitely after the user presses stop.
+- **`planStep` cache-invalidation gap (V16a):** the one plan-mutating message handler that didn't
+  reset the shared `/plan` cache — fixed for consistency (low real-world impact; the popup already
+  force-refreshes on its own).
+- Cheap efficiency fixes alongside: one shared `/plan` fetch per tick (was 2-3), `enforceOpenTabs`
+  parallelized (was serial per-tab model calls — up to 20+ sequential adjudications on session
+  start), `getConfig` routed through the existing 30s cache instead of a fresh round-trip + full
+  `decisionCounts` scan on every page navigation.
+
+**Deliberately NOT fixed (documented, not a regression):** undo-revert-of-unrelated-writes (V15) —
+the undo window is a whole-plan JSON snapshot, so a `toggleStep`/`editPlan` write landing inside the
+same ~5-30s window is reverted along with the advance. A real fix means undo as a targeted inverse
+operation (or an event log) rather than a snapshot — bigger than this pass; flagged for whoever
+picks up Epic D or a later B/C hardening pass.
+
+**Verification:** `npm run typecheck` + `node --check` (all 8 extension files) clean. **`npm run
+smoke` = 133/133** — the pre-existing 108 plus 25 new checks: a real service restart (kill + respawn
+against the same data dir) proving session re-anchoring and the hijack guard, the exact
+time-then-condition sequence that used to eat the condition fire, an undo-then-restart sequence
+proving the hold survives, non-active-block-advance rejection, bad-budget rejection, `all`-policy
+enforcement via a real git condition, template/insert field round-trips, a pure unit test for
+`resolveModelForProvider`, and the youtu.be/enforceTab unit-derivation fixes exercised live.
+

@@ -21,6 +21,7 @@ import {
 import { loadCorpus, retrieveChunks } from "../dist/help.js";
 import { expandTemplate, liftPlanToTemplate } from "../dist/template-store.js";
 import { conditionsSatisfied, decideSwap, deriveSwapMode } from "../dist/plan-runtime.js";
+import { resolveModelForProvider } from "../dist/providers/index.js";
 import { makeEvaluator } from "../dist/watchers.js";
 
 const PORT = process.env.SMOKE_PORT ?? "7399";
@@ -193,6 +194,28 @@ check(
   );
 }
 
+// ---------- unit: model/provider namespace guard (review fix, V5) — pure, key-free ----------
+{
+  const openrouter = { name: "openrouter", defaultModel: "anthropic/claude-haiku-4.5" };
+  const anthropic = { name: "anthropic", defaultModel: "claude-haiku-4-5" };
+  check(
+    "an Anthropic-form model on OpenRouter falls back to the provider default",
+    resolveModelForProvider(openrouter, "claude-haiku-4-5") === "anthropic/claude-haiku-4.5",
+  );
+  check(
+    "an OpenRouter-namespaced model on Anthropic falls back to the provider default",
+    resolveModelForProvider(anthropic, "openai/gpt-5-mini") === "claude-haiku-4-5",
+  );
+  check(
+    "a correctly-namespaced OpenRouter model passes through unchanged",
+    resolveModelForProvider(openrouter, "openai/gpt-5-mini") === "openai/gpt-5-mini",
+  );
+  check(
+    "a correctly-bare Anthropic model passes through unchanged",
+    resolveModelForProvider(anthropic, "claude-opus-4-8") === "claude-opus-4-8",
+  );
+}
+
 // ---------- unit: evaluators on a real scratch git repo + the fake ledger (Epic B1) ----------
 const gitDir = await mkdtemp(join(tmpdir(), "brick-git-"));
 const g = (...args) =>
@@ -258,16 +281,16 @@ g("commit", "--allow-empty", "-q", "-m", "init");
 // ---------- integration: the running service ----------
 let dataDir;
 let srv;
-try {
-  dataDir = await mkdtemp(join(tmpdir(), "brick-smoke-"));
-  srv = spawn("node", ["dist/server.js"], {
+
+function spawnServer(dir) {
+  return spawn("node", ["dist/server.js"], {
     // Blank both provider keys so the run is genuinely key-free (tier-2 takes the stub path and no
     // check ever calls a model) even on a machine whose .env/environment has real keys. An
     // empty-string var also blocks process.loadEnvFile from re-populating it (no override).
     env: {
       ...process.env,
       BRICK_PORT: PORT,
-      BRICK_DATA_DIR: dataDir,
+      BRICK_DATA_DIR: dir,
       ANTHROPIC_API_KEY: "",
       OPENROUTER_API_KEY: "",
       BRICK_WATCH_INTERVAL_MS: "150", // fast watcher ticks so Epic-B checks settle in <1s
@@ -277,15 +300,32 @@ try {
     },
     stdio: "ignore",
   });
+}
 
+async function waitHealthy() {
   for (let i = 0; i < 25; i += 1) {
     try {
       await fetch(BASE + "/health");
-      break;
+      return;
     } catch {
       await sleep(150);
     }
   }
+}
+
+// Kill the current server and spawn a fresh one against the SAME data dir — simulates a service
+// restart mid-plan (review fix regression coverage: restorePlan must re-anchor the session).
+async function restartServer() {
+  srv.kill();
+  await sleep(200);
+  srv = spawnServer(dataDir);
+  await waitHealthy();
+}
+
+try {
+  dataDir = await mkdtemp(join(tmpdir(), "brick-smoke-"));
+  srv = spawnServer(dataDir);
+  await waitHealthy();
 
   // Auth gate: a request without the header is rejected.
   const noauth = await fetch(BASE + "/health");
@@ -580,6 +620,210 @@ try {
   check(`escalation levels advance in order (saw: ${seen.join("→")})`, seenOrdered && seen.includes("t-minus") && seen.includes("t-0") && seen.includes("grace"));
   check("stateVersion bumps on level transitions", (await get("/plan")).plan.stateVersion > v0c);
   await post("/plan/end", {});
+
+  // ---------- Review fixes: restart re-anchoring, hijack guard, undo-hold survival ----------
+  {
+    const rp = await post("/plan/start", { blocks: [{ task: "restart alpha" }, { task: "restart beta" }] });
+    check("plan started before restart", rp.plan.blocks[0].status === "active");
+    await restartServer();
+    const afterRestart = await get("/plan");
+    check("plan survives restart with the same active block", afterRestart.plan.activeBlockId === rp.plan.blocks[0].id);
+    // The real regression: adjudicate with NO task must not 500 (session re-anchored) and a
+    // per-call task must still not override the plan's focus (hijack guard intact post-restart).
+    const adjAfterRestart = await fetch(BASE + "/adjudicate", {
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({ url: "https://nytimes.com" }),
+    });
+    check("adjudicate with no task doesn't 500 after restart (session re-anchored)", adjAfterRestart.status === 200);
+    const hijackAfterRestart = await post("/adjudicate", { url: "https://nytimes.com", task: "unrelated hijack attempt" });
+    check("hijack guard still holds after restart", hijackAfterRestart.focusKey === "restart alpha");
+    await post("/plan/end", {});
+  }
+
+  {
+    // Time-nudge must not disarm a later condition fire (the exact bug: budget expiry consuming
+    // the block's one dedup slot forever under swapMode "first").
+    const gitCond = { type: "git", repoPath: gitDir, predicate: { kind: "head-advanced", ref: "HEAD" } };
+    const tp2 = await post("/plan/start", {
+      blocks: [
+        { task: "time-then-condition", budgetMinutes: 0.003, stopConditions: [gitCond] },
+        { task: "after both" },
+      ],
+    });
+    const twId = tp2.plan.blocks[0].id;
+    await sleep(400); // let the budget expire and fire the time-nudge first
+    let p2 = (await get("/plan")).plan;
+    check("time-nudge fires first (ready, still active)", p2.activeBlockId === twId && p2.blocks[0].ready === true);
+    g("commit", "--allow-empty", "-q", "-m", "push after the time nudge");
+    await sleep(500); // give the watcher a few ticks to see the now-met condition
+    p2 = (await get("/plan")).plan;
+    check("condition fire still lands AFTER a prior time-nudge (not eaten)", p2.activeBlockId === p2.blocks[1].id);
+    await post("/plan/end", {});
+  }
+
+  {
+    // Undo-hold must survive a restart: the restored block must NOT auto-re-advance once its
+    // condition (already met before the undo) is still met after the service comes back.
+    const gitCond = { type: "git", repoPath: gitDir, predicate: { kind: "head-advanced", ref: "HEAD" } };
+    g("commit", "--allow-empty", "-q", "-m", "pre-undo-restart baseline");
+    const up = await post("/plan/start", {
+      blocks: [{ task: "undo restart watched", stopConditions: [gitCond] }, { task: "undo restart next" }],
+    });
+    const uwId = up.plan.blocks[0].id;
+    await sleep(300);
+    g("commit", "--allow-empty", "-q", "-m", "trigger the auto-advance");
+    await sleep(700); // auto-advance fires
+    const undone = await post("/plan/undo-advance", {});
+    check("undo restores the watched block before the restart test", undone.plan.activeBlockId === uwId);
+    await restartServer();
+    await sleep(700); // give the watcher a few ticks post-restart
+    const afterUndoRestart = await get("/plan");
+    check("undo-hold survives a restart (no re-advance)", afterUndoRestart.plan.activeBlockId === uwId);
+    await post("/plan/end", {});
+  }
+
+  {
+    // advancePlan must reject advancing a non-active block (the two-actives bug).
+    const np = await post("/plan/start", { blocks: [{ task: "na1" }, { task: "na2" }, { task: "na3" }] });
+    const pendingId = np.plan.blocks[1].id;
+    const rejected = await fetch(BASE + "/plan/block/advance", {
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({ blockId: pendingId }),
+    });
+    const rejectedBody = await rejected.json();
+    check("advancing a non-active block is rejected, not silently accepted", rejectedBody.plan === undefined && !!rejectedBody.error);
+    check("the active block is unaffected", (await get("/plan")).plan.blocks[0].status === "active");
+    await post("/plan/end", {});
+  }
+
+  {
+    // Budget edit must reject non-finite / absent values instead of coercing to 1 or NaN.
+    const bp2 = await post("/plan/start", { blocks: [{ task: "budget-edit-target", budgetMinutes: 10 }] });
+    const targetId = bp2.plan.blocks[0].id;
+    const badEdit = await fetch(BASE + "/plan/reorder", {
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({ budget: { blockId: targetId } }), // no budgetMinutes at all
+    });
+    check("a budget edit with no minutes is rejected (not silently 1)", badEdit.status >= 400);
+    const badEdit2 = await fetch(BASE + "/plan/reorder", {
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({ budget: { blockId: targetId, budgetMinutes: "abc" } }),
+    });
+    check("a non-numeric budget edit is rejected (not silently NaN)", badEdit2.status >= 400);
+    check("the original budget is untouched", (await get("/plan")).plan.blocks[0].budgetMinutes === 10);
+    await post("/plan/end", {});
+  }
+
+  {
+    // completionPolicy:"all" must be honored by the automatic watcher (was unreachable through
+    // /plan/start before this fix). NOTE: /plan/block/complete is the documented manual escape
+    // hatch — Appendix A says manual is "always available... the escape hatch" — so it always
+    // advances regardless of policy; it is NOT the right tool to test policy enforcement with.
+    // This test drives it through a real met condition instead, with a second condition that
+    // structurally never fires (command conditions are gated off in this server's env).
+    const gitCond = { type: "git", repoPath: gitDir, predicate: { kind: "head-advanced", ref: "HEAD" } };
+    const allPlan = await post("/plan/start", {
+      blocks: [
+        { task: "needs both conditions", completionPolicy: "all", stopConditions: [gitCond, { type: "command", cmd: "false" }] },
+        { task: "after both met" },
+      ],
+    });
+    await sleep(300);
+    g("commit", "--allow-empty", "-q", "-m", "only one of two conditions met");
+    await sleep(500);
+    const stillActive = await get("/plan");
+    const conds = stillActive.plan.blocks[0].stopConditions;
+    check(
+      "completionPolicy 'all' keeps the block active when only ONE of two conditions is met",
+      stillActive.plan.activeBlockId === allPlan.plan.blocks[0].id &&
+        conds.find((c) => c.type === "git").met === true &&
+        conds.find((c) => c.type === "command").met === false,
+    );
+    await post("/plan/end", {});
+  }
+
+  {
+    // Template round-trip must carry stopConditions/advanceMode/completionPolicy through save AND
+    // relaunch (was silently stripped both ways).
+    const gitCond = { type: "git", repoPath: gitDir, predicate: { kind: "head-advanced", ref: "HEAD" } };
+    await post("/plan/start", {
+      blocks: [{ task: "carries watchers", stopConditions: [gitCond], advanceMode: "manual", completionPolicy: "all" }],
+    });
+    const savedTpl = await post("/templates", { fromCurrent: { name: "watcher template" } });
+    check(
+      "save-as-template keeps stopConditions/advanceMode/completionPolicy",
+      savedTpl.template.blocks[0].stopConditions?.length === 1 &&
+        savedTpl.template.blocks[0].advanceMode === "manual" &&
+        savedTpl.template.blocks[0].completionPolicy === "all",
+    );
+    await post("/plan/end", {});
+    const relaunched = await post("/plan/from-template", { templateId: savedTpl.template.id });
+    check(
+      "relaunching the template restores the watcher (unmet, ready for a fresh push)",
+      relaunched.plan.blocks[0].stopConditions?.[0]?.met === false &&
+        relaunched.plan.blocks[0].advanceMode === "manual",
+    );
+    await post("/plan/end", {});
+  }
+
+  {
+    // editPlan.insert must also carry stopConditions/advanceMode (was silently dropped).
+    const ip = await post("/plan/start", { blocks: [{ task: "insert-base" }] });
+    const insertRes = await post("/plan/reorder", {
+      insert: {
+        task: "inserted with a watcher",
+        stopConditions: [{ type: "manual" }],
+        advanceMode: "manual",
+      },
+    });
+    const inserted = insertRes.plan.blocks.find((b) => b.focus.task === "inserted with a watcher");
+    check("editPlan.insert keeps stopConditions/advanceMode", inserted?.stopConditions?.length === 1 && inserted.advanceMode === "manual");
+    await post("/plan/end", {});
+  }
+
+  {
+    // Model/provider namespace guard: a mismatched model id must fall back, never 404-loop silently.
+    await post("/config/settings", { model: "not-a-namespaced-openrouter-id" });
+    const afterBadModel = await get("/config");
+    check("a saved model is NOT silently corrected at save time (guard applies at call time)", afterBadModel.model === "not-a-namespaced-openrouter-id");
+    await post("/config/settings", { model: "" }); // clean up for any later checks
+  }
+
+  {
+    // Restore youtu.be to the page-scope list — an earlier test ("focus-tuning settings persist")
+    // overwrote pageScopeDomains with ["youtube.com", "vimeo.com"], dropping the default. This test
+    // needs it back regardless of suite ordering.
+    await post("/config/settings", { pageScopeDomains: ["youtube.com", "youtu.be"] });
+
+    // Per-page unit derivation server-side: enforceTab (no client unit) must still hit a page-scope
+    // learned entry — the bug was that only content-guard's own computed unit worked.
+    await post("/decisions/learn", {
+      task: TASK,
+      url: "https://youtube.com/watch?v=zzz999",
+      decision: "allow",
+      via: "clarify",
+      scope: "page",
+      unit: "zzz999",
+    });
+    const noUnitGiven = await post("/adjudicate", { url: "https://youtube.com/watch?v=zzz999", task: TASK }); // no `unit` in the request — as enforceTab used to send it
+    check("server derives the page unit when the caller omits it (enforceTab fix)", noUnitGiven.via === "learned" && noUnitGiven.decision === "allow");
+    // youtu.be short-link form — the id lives in the PATH, not a ?v= query param.
+    const ytbLearn = await post("/decisions/learn", {
+      task: TASK,
+      url: "https://youtu.be/abc123",
+      decision: "block",
+      via: "clarify",
+      scope: "page", // client requests page scope without an explicit unit — server derives it
+    });
+    check("youtu.be path-based id is derived server-side (not silently domain-scoped)", ytbLearn.learned.scope === "page" && ytbLearn.learned.unit === "abc123");
+    const ytbCheck = await post("/adjudicate", { url: "https://youtu.be/abc123", task: TASK });
+    check("the youtu.be page-scope learn short-circuits correctly", ytbCheck.via === "learned" && ytbCheck.decision === "block");
+    await post("/decisions/clear", {});
+  }
 } finally {
   if (srv) srv.kill();
   if (dataDir) await rm(dataDir, { recursive: true, force: true }).catch(() => {});
