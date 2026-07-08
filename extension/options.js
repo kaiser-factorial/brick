@@ -88,6 +88,39 @@ $("clearModel").addEventListener("click", () => {
   });
 });
 
+// Workflow templates (Epic T4) — list + delete; creation happens from the popup.
+function loadTemplateMgr() {
+  chrome.runtime.sendMessage({ type: "getTemplates" }, (res) => {
+    const box = $("tplMgr");
+    if (!res || res.error) {
+      box.textContent = "templates unavailable: " + ((res && res.error) || "service unreachable");
+      return;
+    }
+    const list = res.templates || [];
+    box.textContent = "";
+    if (!list.length) {
+      box.textContent = "none saved yet";
+      return;
+    }
+    for (const t of list) {
+      const row = document.createElement("div");
+      row.style.padding = "3px 0";
+      const del = document.createElement("button");
+      del.textContent = "delete";
+      del.style.cssText = "margin:0 8px 0 0;padding:2px 8px;font-size:.75rem;border-color:#ff6b6b;color:#ff6b6b";
+      del.addEventListener("click", () => {
+        if (!confirm(`Delete template "${t.name}"?`)) return;
+        chrome.runtime.sendMessage({ type: "deleteTemplate", id: t.id }, () => loadTemplateMgr());
+      });
+      const label = document.createElement("span");
+      label.textContent = `${t.name} — ${t.blocks.length} blocks${t.slots?.length ? `, slots: ${t.slots.map((s) => s.key).join("/")}` : ""}${t.pattern ? ` · ×${t.pattern.repeat}` : ""}`;
+      row.appendChild(del);
+      row.appendChild(label);
+      box.appendChild(row);
+    }
+  });
+}
+
 // "Ask about BRICK" (Epic H3) — grounded usage Q&A over the service's /help route.
 const helpHistory = []; // short in-page history: [{role, content}]
 
@@ -229,3 +262,4 @@ $("reset").addEventListener("click", () => {
 load();
 loadModels();
 loadFeedback();
+loadTemplateMgr();

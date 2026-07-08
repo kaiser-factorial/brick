@@ -51,6 +51,13 @@
       <div class="label">…or a day plan (one block per line: task | minutes)</div>
       <textarea id="planBlocks" rows="3" spellcheck="false" style="width:100%;background:#06180f;color:var(--fg);border:1px solid var(--line);border-radius:3px;padding:7px;font:inherit;resize:vertical" placeholder="write grant outline | 50&#10;lab check | 15&#10;review PRs | 25"></textarea>
       <button id="startPlan">▶ start day plan</button>
+
+      <div id="tplPane" class="hidden">
+        <div class="label">…or a saved template</div>
+        <select id="tplSelect"></select>
+        <div id="tplSlots"></div>
+        <button id="startTpl">▶ start from template</button>
+      </div>
       <div id="warn" class="warn"></div>
     </div>
 
@@ -72,6 +79,7 @@
           <div><button id="planAdvance" class="small">advance now →</button></div>
           <div><button id="planEnd" class="stop small">■ end plan</button></div>
         </div>
+        <button id="planSaveTpl" class="small">☆ save plan as template</button>
       </div>
 
       <div class="muted" id="stats"></div>

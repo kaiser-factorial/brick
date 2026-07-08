@@ -634,6 +634,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse(r);
           break;
         }
+        case "getTemplates":
+          sendResponse(await api("/templates"));
+          break;
+        case "planFromTemplate": {
+          const r = await api("/plan/from-template", { method: "POST", body: JSON.stringify(msg.opts ?? {}) });
+          planCache = { at: 0, plan: null };
+          await adoptServiceSession();
+          sendResponse(r);
+          break;
+        }
+        case "saveTemplate": // "save current plan as template" (T3)
+          sendResponse(
+            await api("/templates", {
+              method: "POST",
+              body: JSON.stringify({ fromCurrent: { name: msg.name, parameterize: msg.parameterize } }),
+            }),
+          );
+          break;
+        case "deleteTemplate":
+          sendResponse(await api("/templates/" + encodeURIComponent(msg.id), { method: "DELETE" }));
+          break;
         case "startSession":
           sendResponse(await startSession(msg.opts ?? {}));
           break;

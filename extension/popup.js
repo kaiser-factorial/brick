@@ -33,6 +33,7 @@ async function render() {
     await renderPlan();
   } else {
     await loadProjects();
+    await loadTemplates();
   }
 }
 
@@ -91,6 +92,97 @@ async function renderPlan() {
   }
 }
 
+// ---------- templates (Epic T4) ----------
+let tplList = [];
+let projList = [];
+
+async function loadTemplates() {
+  try {
+    const [tplRes, projRes] = await Promise.all([
+      send({ type: "getTemplates" }),
+      send({ type: "getProjects" }).catch(() => ({ projects: [] })),
+    ]);
+    tplList = (tplRes && tplRes.templates) || [];
+    projList = (projRes && projRes.projects) || [];
+  } catch {
+    tplList = [];
+  }
+  $("tplPane").classList.toggle("hidden", !tplList.length);
+  if (!tplList.length) return;
+  const sel = $("tplSelect");
+  sel.innerHTML = "";
+  for (const t of tplList) {
+    const o = document.createElement("option");
+    o.value = t.id;
+    o.textContent = `${t.name} (${t.blocks.length} blocks${t.slots?.length ? `, ${t.slots.length} slots` : ""})`;
+    sel.appendChild(o);
+  }
+  sel.addEventListener("change", renderSlots);
+  renderSlots();
+}
+
+// A slotted template needs bindings: per slot, a project select with a free-text task fallback.
+function renderSlots() {
+  const t = tplList.find((x) => x.id === $("tplSelect").value);
+  const pane = $("tplSlots");
+  pane.innerHTML = "";
+  for (const slot of (t && t.slots) || []) {
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent = `slot ${slot.key} — ${slot.label}`;
+    const sel = document.createElement("select");
+    sel.dataset.slot = slot.key;
+    sel.className = "tpl-bind-proj";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "— type a task below —";
+    sel.appendChild(none);
+    for (const p of projList) {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = p.nextAction ? `${p.name} — ${p.nextAction}` : p.name;
+      if (slot.defaultProjectId === p.id) o.selected = true;
+      sel.appendChild(o);
+    }
+    const input = document.createElement("input");
+    input.type = "text";
+    input.dataset.slot = slot.key;
+    input.className = "tpl-bind-task";
+    input.placeholder = `task for ${slot.key} (if no project picked)`;
+    pane.appendChild(label);
+    pane.appendChild(sel);
+    pane.appendChild(input);
+  }
+}
+
+$("startTpl").addEventListener("click", async () => {
+  const t = tplList.find((x) => x.id === $("tplSelect").value);
+  if (!t) return;
+  const bindings = {};
+  for (const slot of t.slots || []) {
+    const proj = document.querySelector(`.tpl-bind-proj[data-slot="${slot.key}"]`)?.value;
+    const task = document.querySelector(`.tpl-bind-task[data-slot="${slot.key}"]`)?.value.trim();
+    if (proj) bindings[slot.key] = { projectId: proj };
+    else if (task) bindings[slot.key] = { task };
+    else if (!slot.defaultProjectId) {
+      $("warn").textContent = `bind slot ${slot.key} (pick a project or type a task)`;
+      return;
+    }
+  }
+  const opts = {
+    templateId: t.id,
+    bindings,
+    workMinutes: Number($("work").value) || 25,
+    breakMinutes: Number($("break").value) || 5,
+  };
+  const res = await send({ type: "planFromTemplate", opts });
+  if (res && res.error) {
+    $("warn").textContent = res.error;
+    return;
+  }
+  render();
+});
+
 $("startPlan").addEventListener("click", async () => {
   const lines = $("planBlocks")
     .value.split("\n")
@@ -128,6 +220,15 @@ $("planAdvance").addEventListener("click", async () => {
 $("planEnd").addEventListener("click", async () => {
   await send({ type: "planEnd" });
   render();
+});
+
+$("planSaveTpl").addEventListener("click", async () => {
+  const name = prompt("Template name:", "my day");
+  if (!name) return;
+  const parameterize = confirm("Parameterize? OK = lift projects into re-bindable slots · Cancel = keep bound as-is");
+  const res = await send({ type: "saveTemplate", name, parameterize });
+  $("stats").textContent =
+    res && res.template ? `saved template ✓ (${res.template.name})` : "save failed: " + ((res && res.error) || "?");
 });
 
 async function loadProjects() {
