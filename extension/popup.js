@@ -30,10 +30,105 @@ async function render() {
     };
     update();
     tick = setInterval(update, 1000);
+    await renderPlan();
   } else {
     await loadProjects();
   }
 }
+
+// ---------- day plan (Epic A5) ----------
+const GLYPH = { done: "✓", active: "▶", pending: "○", skipped: "✗" };
+
+async function renderPlan() {
+  const res = await send({ type: "getPlan" });
+  const plan = res && res.plan;
+  const has = !!(plan && plan.activeBlockId);
+  $("planPane").classList.toggle("hidden", !has);
+  $("planStrip").style.display = has ? "block" : "none";
+  $("planBudget").style.display = has && plan.active?.budgetMinutes != null ? "block" : "none";
+  if (!has) return;
+
+  const idx = plan.blocks.findIndex((b) => b.id === plan.activeBlockId);
+  $("planStrip").textContent = `plan${plan.label ? " · " + plan.label : ""} · block ${idx + 1} / ${plan.blocks.length}`;
+  if (plan.active?.budgetMinutes != null) {
+    const rem = Math.max(0, plan.active.remainingMinutes ?? 0);
+    $("planBudget").textContent = plan.active.overBudget
+      ? `budget: ${plan.active.budgetMinutes}m — over by ${Math.abs(plan.active.remainingMinutes).toFixed(0)}m`
+      : `budget: ${rem.toFixed(0)}m of ${plan.active.budgetMinutes}m left`;
+  }
+
+  const block = plan.blocks[idx];
+  const steps = $("planSteps");
+  steps.textContent = "";
+  if (block.steps && block.steps.length) {
+    for (const s of block.steps) {
+      const row = document.createElement("div");
+      row.style.cursor = "pointer";
+      row.textContent = `${s.done ? "☑" : "☐"} ${s.label}`;
+      row.addEventListener("click", async () => {
+        await send({ type: "planStep", blockId: block.id, stepId: s.id });
+        renderPlan();
+      });
+      steps.appendChild(row);
+    }
+  } else {
+    steps.textContent = "(none)";
+  }
+
+  const queue = $("planQueue");
+  queue.textContent = "";
+  for (const b of plan.blocks) {
+    const row = document.createElement("div");
+    const extra =
+      b.status === "done" && b.actualMinutes != null
+        ? ` (${b.actualMinutes}m)`
+        : b.budgetMinutes != null
+          ? ` · ${b.budgetMinutes}m`
+          : "";
+    row.textContent = `${GLYPH[b.status] ?? "○"} ${b.focus.task}${extra}${b.repeat ? " ↻" : ""}`;
+    if (b.status === "active") row.style.color = "#d9e8dd";
+    queue.appendChild(row);
+  }
+}
+
+$("startPlan").addEventListener("click", async () => {
+  const lines = $("planBlocks")
+    .value.split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    $("warn").textContent = "add at least one block: task | minutes";
+    return;
+  }
+  const blocks = lines.map((l) => {
+    const [task, mins] = l.split("|").map((s) => s.trim());
+    const b = { task };
+    const m = Number(mins);
+    if (Number.isFinite(m) && m > 0) b.budgetMinutes = m;
+    return b;
+  });
+  const opts = {
+    blocks,
+    workMinutes: Number($("work").value) || 25,
+    breakMinutes: Number($("break").value) || 5,
+  };
+  const res = await send({ type: "planStart", opts });
+  if (res && res.error) {
+    $("warn").textContent = res.error;
+    return;
+  }
+  render();
+});
+
+$("planAdvance").addEventListener("click", async () => {
+  await send({ type: "planAdvance" });
+  render();
+});
+
+$("planEnd").addEventListener("click", async () => {
+  await send({ type: "planEnd" });
+  render();
+});
 
 async function loadProjects() {
   const sel = $("project");

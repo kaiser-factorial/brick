@@ -44,6 +44,22 @@ async function updateBadge(st) {
   const ref = s.graceStartedAt ?? Date.now();
   const minsLeft = Math.max(0, Math.ceil(((s.phaseEndsAt ?? ref) - ref) / 60000));
   const isWork = s.phase === "work";
+
+  // Plan-aware badge (Epic A5): during a plan the at-a-glance number is the active block's budget
+  // minutes left (advisory), and the title carries queue position — "2/3 · <focus> · Nm left".
+  const plan = await getPlanCached();
+  if (plan?.activeBlockId && plan.active) {
+    const idx = plan.blocks.findIndex((b) => b.id === plan.activeBlockId) + 1;
+    const rem = plan.active.remainingMinutes != null ? Math.max(0, Math.ceil(plan.active.remainingMinutes)) : minsLeft;
+    const focusTask = plan.blocks[idx - 1]?.focus.task ?? s.session.focus.task;
+    await chrome.action.setBadgeText({ text: s.graceStartedAt ? `${rem}⏸` : String(rem) });
+    await chrome.action.setBadgeBackgroundColor({ color: isWork ? WORK_COLOR : BREAK_COLOR });
+    await chrome.action.setTitle({
+      title: `BRICK — ${idx}/${plan.blocks.length} · ${focusTask} · ${rem}m left${s.graceStartedAt ? " (paused — grace)" : ""}`,
+    });
+    return;
+  }
+
   await chrome.action.setBadgeText({ text: s.graceStartedAt ? `${minsLeft}⏸` : String(minsLeft) });
   await chrome.action.setBadgeBackgroundColor({ color: isWork ? WORK_COLOR : BREAK_COLOR });
   await chrome.action.setTitle({
@@ -151,18 +167,57 @@ async function startSession(opts) {
   return state;
 }
 
-async function stopSession() {
+// Tear down the local enforcement state (alarms, rules, badge) without touching the service.
+async function teardownLocal() {
   await chrome.alarms.clear(PHASE_ALARM);
   await chrome.alarms.clear(TICK_ALARM);
   await setTier1Rules(false);
+  await setState({ session: null, phase: null, phaseEndsAt: null });
+  await updateBadge();
+  await broadcastPhase(null);
+}
+
+async function stopSession() {
   try {
     await api("/session/stop", { method: "POST", body: "{}" });
   } catch {
     /* service may be down; clear local state regardless */
   }
-  await setState({ session: null, phase: null, phaseEndsAt: null });
-  await updateBadge();
-  await broadcastPhase(null);
+  await teardownLocal();
+}
+
+// ---------- plan layer (Epic A5) ----------
+// The service's PlanRuntime anchors its own FocusSession to the active block; the worker ADOPTS
+// that session for local enforcement (alarms, DNR rules, badge) instead of starting a second one.
+let planCache = { at: 0, plan: null };
+async function getPlanCached(force = false) {
+  if (!force && Date.now() - planCache.at < 20000) return planCache.plan;
+  try {
+    const { plan } = await api("/plan");
+    planCache = { at: Date.now(), plan };
+  } catch {
+    planCache = { at: Date.now(), plan: null };
+  }
+  return planCache.plan;
+}
+
+async function adoptServiceSession() {
+  const { session } = await api("/session");
+  if (!session) {
+    await teardownLocal();
+    return null;
+  }
+  const phaseEndsAt = Date.now() + (session.workMinutes ?? 25) * 60000;
+  const state = { session, phase: "work", phaseEndsAt };
+  await setState(state);
+  await resetRabbitHole();
+  await setTier1Rules(true);
+  await chrome.alarms.create(PHASE_ALARM, { when: phaseEndsAt });
+  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 });
+  await updateBadge(state);
+  await broadcastPhase("work");
+  await enforceOpenTabs();
+  return state;
 }
 
 async function onPhaseAlarm() {
@@ -542,6 +597,43 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             }),
           );
           break;
+        case "getPlan":
+          sendResponse({ plan: await getPlanCached(true) });
+          break;
+        case "planStart": {
+          // Start the plan on the service, then adopt its session for local enforcement.
+          const r = await api("/plan/start", { method: "POST", body: JSON.stringify(msg.opts ?? {}) });
+          planCache = { at: 0, plan: null };
+          await adoptServiceSession();
+          sendResponse(r);
+          break;
+        }
+        case "planAdvance": {
+          const r = await api("/plan/block/advance", {
+            method: "POST",
+            body: JSON.stringify({ blockId: msg.blockId, how: msg.how || "done" }),
+          });
+          planCache = { at: 0, plan: null };
+          if (r.plan && r.plan.activeBlockId) await adoptServiceSession();
+          else await teardownLocal(); // last block advanced → plan over
+          sendResponse(r);
+          break;
+        }
+        case "planStep":
+          sendResponse(
+            await api("/plan/block/step", {
+              method: "POST",
+              body: JSON.stringify({ blockId: msg.blockId, stepId: msg.stepId }),
+            }),
+          );
+          break;
+        case "planEnd": {
+          const r = await api("/plan/end", { method: "POST", body: "{}" });
+          planCache = { at: 0, plan: null };
+          await teardownLocal();
+          sendResponse(r);
+          break;
+        }
         case "startSession":
           sendResponse(await startSession(msg.opts ?? {}));
           break;
