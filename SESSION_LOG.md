@@ -290,9 +290,33 @@ early wave (Epics R, 0, U). All on branch `worktree-workload-early-wave` (draft 
 - 🖐 **Browser-only left:** eyeball the clarify corner card, the popup off-task/on-topic buttons, and
   the options readout in Chrome (preview harness updated with the clarify card).
 
-**Epic 0 is now functionally complete** except the optional tail: 0.6 (corrections→eval cases),
-0.7 (YouTube per-page scoping), 0.8 (rabbit-hole time nudge).
+### BRICK-0.6 / 0.7 / 0.8 — the Epic-0 tail (DONE, 2026-07-08). **Epic 0 is complete.**
+- **0.6 corrections → eval cases:** `LearnedDecision` gains `sampleUrl` (captured on `/decisions/learn`);
+  pure `decisionsToCases()` in `decisions-store.ts` maps learned entries to `(task, url, expected)`;
+  `scripts/export-cases.mjs` writes `.data/corrections.cases.json`; npm scripts **`cases:export`** and
+  **`eval:corrections`** (export + score). Writes to `.data/`, not the curated `examples/cases.json`.
+- **0.7 per-page scoping (YouTube):** `BrickSettings.pageScopeDomains` (default youtube.com/youtu.be in
+  the client); content-guard derives the `?v=` **video id as the `unit`** on every guard call (phase-1,
+  deeper, grace recheck, SPA), learns with `scope:"page"`, and installs an **SPA hook**
+  (pushState/replaceState patch + popstate) that re-adjudicates ~0.7s after each video change (lets the
+  title update; resets the clarify no-renag guard per video). `background.guard` forwards `unit`;
+  `learn` forwards `scope`/`unit`.
+- **0.8 rabbit-hole nudge:** `BrickSettings.rabbitHoleDomains` (default youtube.com) +
+  `rabbitHoleMinutes` (default 45). Background accrues **one active-minute per TICK_ALARM** for the
+  focused tab's flagged domain during work only (`chrome.storage.local` `brickRabbit`; reset per
+  session; /config cached 30s). Each threshold crossing fires **one** `brick:rabbithole` (dedup by
+  level) → corner card "keep going / wrap up"; wrap-up reuses `markPage` (learned block via correction
+  + soft-block).
+- Options page gains a **Focus tuning** section (per-page domains, rabbit-hole domains, threshold) via
+  `/config/settings`. Fixed `/config/settings` to accept the new fields (was model-only — caught by the
+  new smoke check).
+- **Verified:** typecheck + `node --check` (7 files) clean; **smoke 37/37** (adds: page-block-doesn't-
+  leak, decisionsToCases, focus-tuning round-trip, page-scope short-circuit). Live: page-scope allow
+  short-circuits its video while a different video goes to the model and is **blocked** (autoplay-drift
+  case proven end-to-end); export script produces correct eval cases from a scratch store.
+- 🖐 Browser-only: YouTube SPA re-adjudication on real video changes; rabbit-hole nudge at a 2-min test
+  threshold; options focus-tuning save.
 
 ### Next up
-- Optional Epic-0 tail (0.6/0.7/0.8), then Epics H/S/F, then A→(T,B)→C→D.
+- Epics H/S/F (early wave remainder), then A→(T,B)→C→D.
 
