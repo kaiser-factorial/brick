@@ -60,6 +60,20 @@ async function renderPlan() {
 
   const block = plan.blocks[idx];
 
+  // Epic C5: escalation banner — appears at T-minus and beyond, tracking §6's ladder.
+  const esc = plan.active?.escalation;
+  const nextBlock = plan.blocks.slice(idx + 1).find((b) => b.status === "pending");
+  const nextName = nextBlock ? nextBlock.focus.task : "(end of plan)";
+  const banner = $("planEsc");
+  if (esc === "t-minus") {
+    banner.textContent = `budget ends in ${Math.max(0, plan.active.remainingMinutes ?? 0).toFixed(0)}m · next: ${nextName}`;
+  } else if (esc === "t-0") {
+    banner.textContent = `time's up on this block · next: ${nextName}`;
+  } else if (esc === "grace") {
+    banner.textContent = `over budget by ${Math.abs(plan.active.remainingMinutes ?? 0).toFixed(0)}m — advance?`;
+  }
+  banner.classList.toggle("hidden", !esc || esc === "none");
+
   // Epic B: "advance now" glows when a swap trigger fired and waits for the tap; an undo button
   // appears during the auto-advance undo window.
   const adv = $("planAdvance");

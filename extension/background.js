@@ -52,8 +52,12 @@ async function updateBadge(st) {
     const idx = plan.blocks.findIndex((b) => b.id === plan.activeBlockId) + 1;
     const rem = plan.active.remainingMinutes != null ? Math.max(0, Math.ceil(plan.active.remainingMinutes)) : minsLeft;
     const focusTask = plan.blocks[idx - 1]?.focus.task ?? s.session.focus.task;
+    // C5: the badge colour tracks the escalation ladder — amber at T-minus, orange at T-0,
+    // deep red in grace overrun. Break colour still wins during breaks.
+    const ESC_COLOR = { "t-minus": "#d9a441", "t-0": "#e67e22", grace: "#7a1f14" };
+    const color = !isWork ? BREAK_COLOR : ESC_COLOR[plan.active.escalation] ?? WORK_COLOR;
     await chrome.action.setBadgeText({ text: s.graceStartedAt ? `${rem}⏸` : String(rem) });
-    await chrome.action.setBadgeBackgroundColor({ color: isWork ? WORK_COLOR : BREAK_COLOR });
+    await chrome.action.setBadgeBackgroundColor({ color });
     await chrome.action.setTitle({
       title: `BRICK — ${idx}/${plan.blocks.length} · ${focusTask} · ${rem}m left${s.graceStartedAt ? " (paused — grace)" : ""}`,
     });
@@ -201,6 +205,105 @@ async function getPlanCached(force = false) {
   return planCache.plan;
 }
 
+// ---------- NotificationDispatcher (Epic C2/C3): three surfaces, once per event ----------
+// On each tick during a plan: fetch /plan, derive events (escalation level changes, auto-switches,
+// ready), dedup by a persisted (plan, block, event) key so a nudge fires ONCE per level — even
+// across service-worker restarts — then fan out to OS notification + in-page card + badge/popup.
+async function getDispatchState() {
+  const { brickDispatch } = await chrome.storage.local.get("brickDispatch");
+  return brickDispatch ?? { planId: null, lastActiveBlockId: null, notified: {} };
+}
+
+function osNotify(id, title, message) {
+  try {
+    chrome.notifications.create(id, {
+      type: "basic",
+      iconUrl: "icons/icon128.png",
+      title,
+      message,
+      priority: 1,
+    });
+  } catch {
+    /* notifications unavailable — the other surfaces still fire */
+  }
+}
+
+// In-page card on the ACTIVE tab (Epic C4) — content-guard renders it via the shared overlay.
+async function pageNotify(payload) {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id && tab.url?.startsWith("http")) {
+      await chrome.tabs.sendMessage(tab.id, { type: "brick:switch", ...payload });
+    }
+  } catch {
+    /* no content script on the active tab — OS + popup still cover it */
+  }
+}
+
+function blockLabel(plan, id) {
+  return plan.blocks.find((b) => b.id === id)?.focus.task ?? "next block";
+}
+
+function nextLabel(plan) {
+  const idx = plan.blocks.findIndex((b) => b.id === plan.activeBlockId);
+  const next = plan.blocks.slice(idx + 1).find((b) => b.status === "pending");
+  return next ? next.focus.task : "(end of plan)";
+}
+
+async function dispatchNotifications() {
+  const plan = await getPlanCached(true);
+  const st = await getDispatchState();
+  if (!plan || !plan.activeBlockId) {
+    if (st.planId) await chrome.storage.local.set({ brickDispatch: { planId: null, lastActiveBlockId: null, notified: {} } });
+    return;
+  }
+  if (st.planId !== plan.id) {
+    st.planId = plan.id;
+    st.lastActiveBlockId = plan.activeBlockId;
+    st.notified = {};
+  }
+
+  const fire = (key) => {
+    if (st.notified[key]) return false;
+    st.notified[key] = true;
+    return true;
+  };
+  const active = plan.blocks.find((b) => b.id === plan.activeBlockId);
+  const label = active?.focus.task ?? "current block";
+  const next = nextLabel(plan);
+
+  // Auto-switch happened (queue moved with an undo window) → announce it.
+  if (st.lastActiveBlockId && st.lastActiveBlockId !== plan.activeBlockId) {
+    if (plan.undo && fire(`${plan.id}:${plan.activeBlockId}:switched`)) {
+      osNotify(`brick-switch-${plan.activeBlockId}`, "BRICK — switched blocks", `Now: ${label}. Undo is available for a few seconds.`);
+      await pageNotify({ title: "Switched blocks", body: `Now: ${label}`, actions: ["undo", "stay"] });
+    }
+    st.lastActiveBlockId = plan.activeBlockId;
+  }
+
+  // Escalation ladder (§6): quiet heads-up → nudge → insistent re-nudge. Once per level.
+  const level = plan.active?.escalation;
+  if (level === "t-minus" && fire(`${plan.id}:${plan.activeBlockId}:t-minus`)) {
+    // Quiet: badge tint + popup banner only — no OS toast, no in-page card.
+    await updateBadge();
+  } else if (level === "t-0" && fire(`${plan.id}:${plan.activeBlockId}:t-0`)) {
+    osNotify(`brick-t0-${plan.activeBlockId}`, "BRICK — time's up", `Time's up on: ${label}. Next: ${next}`);
+    await pageNotify({ title: "Time's up", body: `${label} — next: ${next}`, actions: ["advance", "stay"] });
+    await updateBadge();
+  } else if (level === "grace" && fire(`${plan.id}:${plan.activeBlockId}:grace`)) {
+    osNotify(`brick-grace-${plan.activeBlockId}`, "BRICK — still on the old block", `Over budget on: ${label}. Advance to: ${next}?`);
+    await pageNotify({ title: "Over budget", body: `Still on ${label} — advance to ${next}?`, actions: ["advance", "stay"] });
+    await updateBadge();
+  }
+
+  // Manual-mode "ready to advance" (a met condition is waiting for your tap).
+  if (active?.ready && fire(`${plan.id}:${plan.activeBlockId}:ready`)) {
+    osNotify(`brick-ready-${plan.activeBlockId}`, "BRICK — ready to advance", `${label} is ready. Tap "advance now" when you are.`);
+  }
+
+  await chrome.storage.local.set({ brickDispatch: st });
+}
+
 async function adoptServiceSession() {
   const { session } = await api("/session");
   if (!session) {
@@ -213,7 +316,8 @@ async function adoptServiceSession() {
   await resetRabbitHole();
   await setTier1Rules(true);
   await chrome.alarms.create(PHASE_ALARM, { when: phaseEndsAt });
-  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 });
+  // 30s ticks during a plan — the dispatcher needs to catch escalation boundaries promptly (C2).
+  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 0.5 });
   await updateBadge(state);
   await broadcastPhase("work");
   await enforceOpenTabs();
@@ -500,6 +604,7 @@ chrome.alarms.onAlarm.addListener((a) => {
   else if (a.name === TICK_ALARM) {
     updateBadge();
     accrueRabbitHole(); // Epic 0.8 — count active-during-work time on flagged domains
+    dispatchNotifications(); // Epic C2 — escalation/switch/ready events, once each
   }
 });
 chrome.runtime.onStartup.addListener(reconcile);

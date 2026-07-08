@@ -279,6 +279,41 @@
     });
   };
 
+  // Plan switch/escalation card (Epic C4): a bottom-right, non-blocking card at swap time —
+  // "Time's up on A — start B?" with Advance / Stay (or Undo after an auto-switch). Reuses the
+  // shared overlay; buttons hit the background's plan routes.
+  const showSwitchCard = (msg) => {
+    if (!window.BrickOverlay) return;
+    const BTN = {
+      advance: {
+        label: "Advance →",
+        kind: "yes",
+        onClick: () => {
+          chrome.runtime.sendMessage({ type: "planAdvance" }).catch(() => {});
+          removeOverlay();
+        },
+      },
+      undo: {
+        label: "↩ Undo",
+        kind: "go",
+        onClick: () => {
+          chrome.runtime.sendMessage({ type: "planUndo" }).catch(() => {});
+          removeOverlay();
+        },
+      },
+      stay: { label: "Stay", kind: "stay", onClick: () => removeOverlay() },
+    };
+    window.BrickOverlay.show({
+      card: {
+        corner: true,
+        tag: "■ BRICK MODE",
+        title: msg.title || "Plan update",
+        body: msg.body || "",
+        buttons: (msg.actions || ["stay"]).map((a) => BTN[a]).filter(Boolean),
+      },
+    });
+  };
+
   // Background tells us a work phase re-engaged on this already-open tab.
   // brick:phase keeps the overlay synced with the Pomodoro: when the phase flips away from "work"
   // (break / session ended) any active grace-minute countdown is cleared, so the overlay doesn't
@@ -291,6 +326,7 @@
       if (msg.phase !== "work") removeOverlay();
       if (msg.phase === "work" || msg.phase === "break") showPhaseBorder(msg.phase);
     } else if (msg?.type === "brick:rabbithole") showRabbitHole(msg.domain, msg.minutes);
+    else if (msg?.type === "brick:switch") showSwitchCard(msg);
   });
 
   // Install an SPA-navigation hook on page-scoped domains so video→video changes re-adjudicate
