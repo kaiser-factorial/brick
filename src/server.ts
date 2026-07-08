@@ -20,6 +20,17 @@ import {
   resolvePrecedence,
 } from "./decisions-store.js";
 import { answerHelp } from "./help.js";
+import {
+  advanceBlock,
+  completeBlock,
+  editPlan,
+  endPlan,
+  planView,
+  restorePlan,
+  startPlan,
+  toggleStep,
+} from "./plan-runtime.js";
+import type { StartBlockInput } from "./plan-runtime.js";
 import type { ChatTurn } from "./providers/index.js";
 import {
   endSession,
@@ -51,6 +62,8 @@ let tiers = await loadTiers();
 let decisions = await loadDecisions();
 // App settings (R2): the configurable adjudicator model lives here (.data/settings.json).
 let settings = await loadSettings();
+// Plan layer (Epic A): re-hydrate a persisted mid-flight plan so the queue survives restarts.
+await restorePlan();
 const effectiveModel = (): string => settings.model?.trim() || SEED_MODEL;
 
 type Body = Record<string, unknown>;
@@ -366,6 +379,101 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
     case "GET /decisions":
       return sendJson(res, 200, { decisions, counts: decisionCounts(decisions) });
+
+    case "GET /plan":
+      // Current plan + advisory budget readout + monotonic stateVersion (null when no plan).
+      return sendJson(res, 200, { plan: planView() });
+
+    case "POST /plan/start": {
+      const body = await readJson(req);
+      const raw = Array.isArray(body.blocks) ? (body.blocks as Array<Record<string, unknown>>) : [];
+      if (!raw.length) return sendJson(res, 400, { error: "blocks required (task or projectId each)" });
+      const blocks: StartBlockInput[] = [];
+      for (const b of raw) {
+        const task = typeof b.task === "string" && b.task.trim() ? b.task.trim() : undefined;
+        const projectId =
+          typeof b.projectId === "string" && b.projectId.trim() ? b.projectId.trim() : undefined;
+        if (!task && !projectId) return sendJson(res, 400, { error: "each block needs task or projectId" });
+        const focus: FocusTask = projectId
+          ? await resolveFocusTask({ projectId })
+          : { task: task!, source: "explicit" };
+        blocks.push({
+          focus,
+          budgetMinutes: typeof b.budgetMinutes === "number" ? b.budgetMinutes : undefined,
+          steps: Array.isArray(b.steps) ? (b.steps as unknown[]).map(String).slice(0, 20) : undefined,
+          repeat:
+            b.repeat && typeof b.repeat === "object"
+              ? {
+                  mode: "requeue",
+                  maxPerDay:
+                    typeof (b.repeat as Record<string, unknown>).maxPerDay === "number"
+                      ? ((b.repeat as Record<string, unknown>).maxPerDay as number)
+                      : undefined,
+                }
+              : undefined,
+          swapMode:
+            b.swapMode === "condition" || b.swapMode === "time" || b.swapMode === "first" || b.swapMode === "both"
+              ? b.swapMode
+              : undefined,
+        });
+      }
+      const plan = await startPlan({
+        label: str(body, "label"),
+        blocks,
+        workMinutes: typeof body.workMinutes === "number" ? body.workMinutes : undefined,
+        breakMinutes: typeof body.breakMinutes === "number" ? body.breakMinutes : undefined,
+      });
+      return sendJson(res, 200, { plan });
+    }
+
+    case "POST /plan/block/advance": {
+      const body = await readJson(req);
+      const how = str(body, "how") === "skipped" ? "skipped" : "done";
+      return sendJson(res, 200, { plan: await advanceBlock(str(body, "blockId"), how) });
+    }
+
+    case "POST /plan/block/step": {
+      const body = await readJson(req);
+      const stepId = str(body, "stepId");
+      if (!stepId) return sendJson(res, 400, { error: "stepId required" });
+      return sendJson(res, 200, { plan: await toggleStep(str(body, "blockId"), stepId) });
+    }
+
+    case "POST /plan/block/complete": {
+      const body = await readJson(req);
+      return sendJson(res, 200, { plan: await completeBlock(str(body, "blockId")) });
+    }
+
+    case "POST /plan/reorder": {
+      const body = await readJson(req);
+      const insertRaw = body.insert as Record<string, unknown> | undefined;
+      let insert: StartBlockInput | undefined;
+      if (insertRaw && typeof insertRaw === "object") {
+        const task = typeof insertRaw.task === "string" && insertRaw.task.trim() ? insertRaw.task.trim() : undefined;
+        if (!task) return sendJson(res, 400, { error: "insert needs a task" });
+        insert = {
+          focus: { task, source: "explicit" },
+          budgetMinutes: typeof insertRaw.budgetMinutes === "number" ? insertRaw.budgetMinutes : undefined,
+          steps: Array.isArray(insertRaw.steps) ? (insertRaw.steps as unknown[]).map(String) : undefined,
+        };
+      }
+      const plan = await editPlan({
+        order: Array.isArray(body.order) ? (body.order as unknown[]).map(String) : undefined,
+        drop: str(body, "drop"),
+        budget:
+          body.budget && typeof body.budget === "object"
+            ? {
+                blockId: String((body.budget as Record<string, unknown>).blockId ?? ""),
+                budgetMinutes: Number((body.budget as Record<string, unknown>).budgetMinutes ?? 0),
+              }
+            : undefined,
+        insert,
+      });
+      return sendJson(res, 200, { plan });
+    }
+
+    case "POST /plan/end":
+      return sendJson(res, 200, { plan: await endPlan() });
 
     case "POST /help": {
       // Grounded usage Q&A (Epic H): answers only from the help/ corpus (+ read-only state tools).

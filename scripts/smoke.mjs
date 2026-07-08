@@ -214,6 +214,65 @@ try {
   await post("/session/stop", {});
   const after = await get("/session");
   check("session stops", after.session === null);
+
+  // ---------- Epic A: plan queue lifecycle (key-free — explicit tasks, no ledger) ----------
+  const planStart = await post("/plan/start", {
+    label: "smoke day",
+    workMinutes: 25,
+    breakMinutes: 5,
+    blocks: [
+      { task: "block one: write the intro", budgetMinutes: 1, steps: ["outline", "draft"] },
+      { task: "block two: lab check", budgetMinutes: 1, repeat: { maxPerDay: 2 } },
+      { task: "block three: review PRs", budgetMinutes: 1 },
+    ],
+  });
+  const p0 = planStart.plan;
+  check("plan starts with 3 blocks, first active", p0.blocks.length === 3 && p0.blocks[0].status === "active" && p0.activeBlockId === p0.blocks[0].id);
+  check("plan start opened a session anchored to block 1", (await get("/session")).session?.focus.task.startsWith("block one"));
+  check("plan view reports advisory budget", p0.active?.budgetMinutes === 1 && typeof p0.active?.elapsedMinutes === "number");
+  const v0 = p0.stateVersion;
+
+  // Safety property: a per-call task can't hijack adjudication while a plan anchors the focus.
+  const hijack = await post("/adjudicate", { url: "https://nytimes.com", task: "totally different thing" });
+  check("per-call task can't override the active block's focus", hijack.focusKey === "block one: write the intro");
+
+  // Step toggle persists and bumps stateVersion.
+  const stepId = p0.blocks[0].steps[0].id;
+  const afterStep = await post("/plan/block/step", { stepId });
+  check("step toggles + stateVersion bumps", afterStep.plan.blocks[0].steps[0].done === true && afterStep.plan.stateVersion > v0);
+  check("step persists on re-read", (await get("/plan")).plan.blocks[0].steps[0].done === true);
+
+  // Advance 1 → 2; session re-anchors.
+  const adv1 = await post("/plan/block/advance", {});
+  check("advance moves to block 2 + records actualMinutes", adv1.plan.activeBlockId === adv1.plan.blocks[1].id && typeof adv1.plan.blocks[0].actualMinutes === "number");
+  check("session re-anchored to block 2", (await get("/session")).session?.focus.task.startsWith("block two"));
+
+  // Advance the repeating block → it re-enqueues exactly once (then respects maxPerDay=2).
+  const adv2 = await post("/plan/block/advance", {});
+  const tail = adv2.plan.blocks[adv2.plan.blocks.length - 1];
+  check("repeat block re-enqueued at the tail", adv2.plan.blocks.length === 4 && tail.focus.task.startsWith("block two") && tail.status === "pending");
+  check("now active: block three", adv2.plan.activeBlockId === adv2.plan.blocks[2].id);
+
+  // Reorder: move the requeued copy ahead — settled blocks keep position.
+  const re = await post("/plan/reorder", { order: [tail.id] });
+  check("reorder keeps settled blocks + moves pending", re.plan.blocks[3].id === tail.id && re.plan.blocks[2].status === "active");
+
+  // Advance to the requeued copy, then advance it — maxPerDay=2 already reached → no new copy.
+  await post("/plan/block/advance", {});
+  const adv4 = await post("/plan/block/advance", {});
+  check("maxPerDay caps the requeue (no third copy)", adv4.plan === null || adv4.plan.blocks.filter((b) => b.focus.task.startsWith("block two")).length === 2);
+  check("advancing the last block ends the plan", (await get("/plan")).plan === null);
+  check("plan end also ended the session", (await get("/session")).session === null);
+
+  // Regression: single-focus session still works when no plan is active.
+  const solo = await post("/session/start", { task: TASK });
+  check("single session works after a plan", Boolean(solo.session?.id));
+  await post("/session/stop", {});
+
+  // Explicit end: start a fresh 2-block plan and end it outright.
+  await post("/plan/start", { blocks: [{ task: "x1" }, { task: "x2" }] });
+  const ended = await post("/plan/end", {});
+  check("/plan/end skips remaining blocks + clears plan", ended.plan.activeBlockId === undefined && (await get("/plan")).plan === null);
 } finally {
   if (srv) srv.kill();
   if (dataDir) await rm(dataDir, { recursive: true, force: true }).catch(() => {});
