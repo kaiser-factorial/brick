@@ -18,8 +18,11 @@
       .bad { color: var(--red); }
       .warn { color: var(--amber); }
       .muted { color: var(--dim); font-size: 0.8rem; }
-      textarea { width: 100%; background: #06180f; color: var(--fg); border: 1px solid var(--line);
-        border-radius: 3px; padding: 8px; font: inherit; resize: vertical; }
+      textarea, input[type="text"] { width: 100%; box-sizing: border-box; background: #06180f;
+        color: var(--fg); border: 1px solid var(--line); border-radius: 3px; padding: 8px; font: inherit;
+        resize: vertical; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      .row input[type="text"] { flex: 1; }
       button { margin-top: 12px; background: transparent; color: var(--fg); border: 1px solid var(--fg);
         border-radius: 3px; padding: 8px 16px; font: inherit; cursor: pointer; }
       button:hover { background: var(--fg); color: var(--bg); }
@@ -31,6 +34,28 @@
 
     <h2>Service</h2>
     <div class="status" id="status">checking 127.0.0.1:7373 …</div>
+
+    <h2>Adjudicator model</h2>
+    <div class="row">
+      <input
+        type="text"
+        id="model"
+        list="modelList"
+        spellcheck="false"
+        autocomplete="off"
+        placeholder="type to search compatible models, or paste any model id…"
+      />
+      <datalist id="modelList"></datalist>
+    </div>
+    <div style="margin-top:2px">
+      <button id="saveModel">save model</button>
+      <button id="clearModel" style="margin-left:8px">use default</button>
+      <span id="modelSaved" class="muted"></span>
+    </div>
+    <p class="muted" id="modelHint">
+      Only models that support tool calls are suggested (the adjudicator needs forced tool use). Click
+      the field for the full list, or start typing to filter. You can also paste any model id.
+    </p>
 
     <h2>Tier 1 — always blocked</h2>
     <textarea id="tier1" rows="9" spellcheck="false" placeholder="one domain per line, e.g. reddit.com"></textarea>

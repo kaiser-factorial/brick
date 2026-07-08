@@ -1,10 +1,38 @@
-// BRICK MODE settings — service status + editable tier lists.
+// BRICK MODE settings — service status, adjudicator model, and editable tier lists.
 const $ = (id) => document.getElementById(id);
 const lines = (id) =>
   $(id)
     .value.split("\n")
     .map((s) => s.trim())
     .filter(Boolean);
+
+// OpenRouter prices are per-token USD strings; show a readable per-1M-tokens figure.
+function priceHint(m) {
+  const p = Number(m.prompt);
+  if (!Number.isFinite(p)) return "";
+  if (p === 0) return " · free";
+  return ` · $${(p * 1e6).toFixed(2)}/M in`;
+}
+
+function loadModels() {
+  chrome.runtime.sendMessage({ type: "getModels" }, (res) => {
+    const list = $("modelList");
+    const hint = $("modelHint");
+    if (!res || res.error || !Array.isArray(res.models) || res.models.length === 0) {
+      // No catalog (e.g. no OpenRouter key) → the field still works as free-text.
+      if (res && res.error) hint.textContent = `Model suggestions unavailable (${res.error}). You can still paste any model id.`;
+      return;
+    }
+    list.innerHTML = "";
+    for (const m of res.models) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.label = `${m.name}${priceHint(m)}`;
+      list.appendChild(opt);
+    }
+    hint.textContent = `${res.models.length} tool-call-capable models. Click the field for the full list or type to filter; you can also paste any model id.`;
+  });
+}
 
 function load() {
   chrome.runtime.sendMessage({ type: "getConfig" }, (cfg) => {
@@ -16,12 +44,37 @@ function load() {
     }
     const key = cfg.hasApiKey
       ? '<span class="ok">key set</span>'
-      : '<span class="warn">no ANTHROPIC_API_KEY — Tier-2 adjudication is stubbed (allow)</span>';
-    status.innerHTML = `<span class="ok">✓ connected</span> · model ${cfg.model} · ${key}`;
+      : `<span class="warn">no ${cfg.provider || "provider"} API key — Tier-2 adjudication is stubbed (allow)</span>`;
+    status.innerHTML = `<span class="ok">✓ connected</span> · ${cfg.provider || "?"} · model ${cfg.model} · ${key}`;
+    $("model").value = cfg.model || "";
     $("tier1").value = ((cfg.tiers && cfg.tiers.tier1) || []).join("\n");
     $("tier3").value = ((cfg.tiers && cfg.tiers.tier3) || []).join("\n");
   });
 }
+
+function flash(id, text, ms = 2000) {
+  $(id).textContent = text;
+  setTimeout(() => ($(id).textContent = ""), ms);
+}
+
+$("saveModel").addEventListener("click", () => {
+  chrome.runtime.sendMessage(
+    { type: "saveSettings", settings: { model: $("model").value.trim() } },
+    (res) => {
+      if (!res || res.error) return flash("modelSaved", "save failed: " + ((res && res.error) || "unknown"), 3000);
+      $("model").value = res.model || "";
+      flash("modelSaved", `saved ✓ (now: ${res.model})`);
+    },
+  );
+});
+
+$("clearModel").addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "saveSettings", settings: { model: "" } }, (res) => {
+    if (!res || res.error) return flash("modelSaved", "reset failed: " + ((res && res.error) || "unknown"), 3000);
+    $("model").value = res.model || "";
+    flash("modelSaved", `using default ✓ (${res.model})`);
+  });
+});
 
 $("save").addEventListener("click", () => {
   chrome.runtime.sendMessage(
@@ -33,8 +86,7 @@ $("save").addEventListener("click", () => {
       }
       $("tier1").value = ((res.tiers && res.tiers.tier1) || []).join("\n");
       $("tier3").value = ((res.tiers && res.tiers.tier3) || []).join("\n");
-      $("saved").textContent = "saved ✓";
-      setTimeout(() => ($("saved").textContent = ""), 2000);
+      flash("saved", "saved ✓");
     },
   );
 });
@@ -48,9 +100,9 @@ $("reset").addEventListener("click", () => {
     }
     $("tier1").value = ((res.tiers && res.tiers.tier1) || []).join("\n");
     $("tier3").value = ((res.tiers && res.tiers.tier3) || []).join("\n");
-    $("saved").textContent = "reset to defaults ✓";
-    setTimeout(() => ($("saved").textContent = ""), 2500);
+    flash("saved", "reset to defaults ✓", 2500);
   });
 });
 
 load();
+loadModels();

@@ -288,6 +288,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         case "resetTiers":
           sendResponse(await api("/config/tiers/reset", { method: "POST", body: "{}" }));
           break;
+        case "getModels":
+          sendResponse(await api("/models"));
+          break;
+        case "saveSettings":
+          sendResponse(
+            await api("/config/settings", {
+              method: "POST",
+              body: JSON.stringify(msg.settings ?? {}),
+            }),
+          );
+          break;
         case "startSession":
           sendResponse(await startSession(msg.opts ?? {}));
           break;
