@@ -393,3 +393,38 @@ early wave (Epics R, 0, U). All on branch `worktree-workload-early-wave` (draft 
 - **Early wave done: U ✓ R ✓ 0 ✓ S ✓ F ✓ H ✓.** Next: the plan layer — Epic A (plan queue), then
   (T, B) → C → D per `WORKLOAD_TICKETS.md`.
 
+---
+
+## Plan layer — Epic A (plan queue, no signals) — DONE 2026-07-08
+Branch `workload-plan-layer` (off master post-merge of PR #1).
+
+- **A1 types** (`types.ts`): `WorkloadPlan`, `WorkBlock` (reuses `FocusTask` — the keystone),
+  `Step`, `StopCondition` union + `GitPredicate` (structural only; evaluators = Epic B),
+  `RepeatSpec`, `SwapMode` (field stored; behavior = Epic B).
+- **A2 store** (`src/plan-store.ts`): `PlanStore {load/save/advance/clear}` +
+  `LocalPlanStore` (`.data/plan.json`, invalid → null) + **pure `advancePlan`** — finish block,
+  record `actualMinutes`, honour `repeat.requeue` (clones `id~N`, `maxPerDay` counts all copies,
+  steps/conditions reset on the clone), activate next pending or clear `activeBlockId`.
+- **A3 runtime** (`src/plan-runtime.ts`): the active block **delegates to the existing
+  `FocusSession`** (advance = end + start anchored to the next block's focus — adjudicator/tiers/
+  learned decisions untouched); advisory budget readout (elapsed/remaining/overBudget) on
+  `planView()`; monotonic `stateVersion`; `toggleStep`, `completeBlock` (manual-condition
+  fallback), `editPlan` (reorder pending tail / drop / extend budget / insert), `endPlan` (skips
+  the rest), `restorePlan()` re-hydrates on boot, `usePlanStore()` = the Epic-D seam.
+- **A4 routes** (`server.ts`): `GET /plan`; `POST /plan/start` (blocks by `task` or `projectId`),
+  `/plan/block/advance`, `/plan/block/step`, `/plan/block/complete`, `/plan/reorder`, `/plan/end`.
+  The focus-hijack safety property holds: during a plan the session focus (= active block) wins
+  over any per-call `task`.
+- **A5 extension**: background **adopts** the service's plan-anchored session for local enforcement
+  (alarms/DNR/badge — never starts a second one); plan-aware badge (budget minutes left; title
+  `2/3 · <focus> · Nm left`); popup gains a day-plan builder (`task | minutes` per line), plan
+  strip, budget readout, clickable step checklist, queue with glyphs (✓▶○✗ ↻), `advance now` /
+  `end plan`.
+- **Corpus**: `help/day-plans.md` added (the promised when-A-lands doc).
+- **Verified:** typecheck + node --check clean; **smoke 62/62** (16 new: start/anchor/budget,
+  hijack-safety, step persist + stateVersion, advance ×N with actualMinutes, repeat requeue +
+  maxPerDay cap, reorder keeps settled blocks, both end paths, single-session regression). Live:
+  **plan survives a service restart** (`restorePlan`), `plan.json` valid.
+- 🖐 Browser gate (Phase A): 3×1-min plan from the popup — badge `1/3`→`2/3`, step toggle persists
+  across popup reopen, advance/end, repeat block reappears once.
+
