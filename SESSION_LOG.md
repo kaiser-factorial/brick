@@ -245,6 +245,27 @@ early wave (Epics R, 0, U). All on branch `worktree-workload-early-wave` (draft 
   (OpenRouter verdicts + Anthropic fallback + R3 fail-open all confirmed; see the R1 line above).
 - 🖐 **Browser regression (U1):** confirm the grace overlay still looks/behaves the same on real sites
   (preview harness was shared for a quick eyeball).
-- Not built this session (next up): R2/R3-extension bits, 0.3/0.5/0.7/0.8 (need U + browser), Epics
-  H/S/F, then A→(T,B)→C→D.
+
+### BRICK-R2 — configurable model + tool-capable dropdown (DONE, 2026-07-08)
+- **Settings store:** `BrickSettings` + `loadSettings`/`saveSettings` in `config-store.ts`
+  (`.data/settings.json`; blank model = "unset" → reverts to seed). Extensible for Epic B's
+  `advanceMode`/`undoWindowSec`.
+- **Server:** effective model = `settings.model || BRICK_MODEL || provider.default`; `GET /config`
+  reflects it (+ `seedModel`, `settings`); `POST /config/settings` persists; `/adjudicate` sends the
+  effective model per-request **and echoes the model actually used** in the response. Model is now a
+  per-request `AdjudicationInput.model` (overrides env/default).
+- **Tool-capable dropdown (Corina's ask):** new `GET /models` fetches OpenRouter's catalog
+  **server-side** (key never leaves the service), filters to `supported_parameters ∋ "tools"` (263 of
+  343), sorts by name, caches 1h. Options page uses a native `<input list=datalist>` **combobox** —
+  click for the full list *or* type to filter, and it doubles as the free-text custom-id field (for
+  Anthropic-path ids not in the catalog). `background.js` gains `getModels` + `saveSettings` routes.
+- **Verified live:** `GET /models` = 263 tool models; set `openai/gpt-5-mini` → `/adjudicate` response
+  `model: openai/gpt-5-mini-2025-08-07` (the chosen model was actually used, not the default); a bogus
+  id → fail-open allow (conf 0), no crash. `npm run smoke` = **31/31** (added the settings round-trip;
+  still hermetic/offline — tier-1 short-circuits, no network model call).
+- **Remaining Phase-R:** none blocking — R4 (multi-model eval table) is optional. Provider/model epic
+  is functionally complete.
+
+### Next up
+- 0.3/0.5/0.7/0.8 (need Epic U + browser), Epics H/S/F, then A→(T,B)→C→D.
 
