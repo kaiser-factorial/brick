@@ -39,12 +39,15 @@ async function updateBadge(st) {
     await chrome.action.setTitle({ title: "BRICK MODE — no active session" });
     return;
   }
-  const minsLeft = Math.max(0, Math.ceil(((s.phaseEndsAt ?? Date.now()) - Date.now()) / 60000));
+  // During a grace pause (F1) the countdown is frozen: remaining time is measured against the
+  // moment grace began, not now — so the badge stops shrinking while the clock is paused.
+  const ref = s.graceStartedAt ?? Date.now();
+  const minsLeft = Math.max(0, Math.ceil(((s.phaseEndsAt ?? ref) - ref) / 60000));
   const isWork = s.phase === "work";
-  await chrome.action.setBadgeText({ text: String(minsLeft) });
+  await chrome.action.setBadgeText({ text: s.graceStartedAt ? `${minsLeft}⏸` : String(minsLeft) });
   await chrome.action.setBadgeBackgroundColor({ color: isWork ? WORK_COLOR : BREAK_COLOR });
   await chrome.action.setTitle({
-    title: `BRICK — ${isWork ? "work" : "break"} · ${minsLeft} min left · ${s.session.focus.task}`,
+    title: `BRICK — ${isWork ? "work" : "break"}${s.graceStartedAt ? " (paused — grace)" : ""} · ${minsLeft} min left · ${s.session.focus.task}`,
   });
 }
 
@@ -79,12 +82,58 @@ async function setTier1Rules(enable) {
 }
 
 // Pure: compute the next phase + its end time, advancing from the prior end (so missed phases
-// catch up correctly when reconciling after the worker/browser was asleep).
+// catch up correctly when reconciling after the worker/browser was asleep). Each fresh work block
+// starts with a clean grace ledger (Epic F: escalation + the grace budget reset per block).
 function nextPhaseState(st) {
   const toBreak = st.phase === "work";
   const minutes = toBreak ? st.session.breakMinutes ?? 5 : st.session.workMinutes ?? 25;
   const base = st.phaseEndsAt ?? Date.now();
-  return { ...st, phase: toBreak ? "break" : "work", phaseEndsAt: base + minutes * 60000 };
+  return {
+    ...st,
+    phase: toBreak ? "break" : "work",
+    phaseEndsAt: base + minutes * 60000,
+    graceStartedAt: null,
+    graceCount: toBreak ? st.graceCount : 0,
+    graceUsedMs: toBreak ? st.graceUsedMs : 0,
+  };
+}
+
+// ---------- focus-time integrity (Epic F1) ----------
+// Minutes spent on the grace overlay shouldn't be eaten from the work block: while grace is active
+// we clear the phase alarm (pause the clock), and on exit we push phaseEndsAt forward by the paused
+// duration and re-arm. A per-block cap prevents "you keep your minutes" becoming "you never work".
+async function graceStart() {
+  const st = await getState();
+  if (!st.session || st.phase !== "work") return { ok: true, graceCount: 0 }; // nothing to pause
+  const fb = await getFeedback();
+  const capMs = Math.max(1, Number(fb.maxGraceMin) || 5) * 60000;
+  if ((st.graceUsedMs || 0) >= capMs) {
+    // Budget spent — past the cap the escalation has maxed out and the page hard-blocks (F1+F2).
+    return { ok: false, capped: true, graceCount: st.graceCount || 0 };
+  }
+  if (!st.graceStartedAt) {
+    st.graceStartedAt = Date.now();
+    st.graceCount = (st.graceCount || 0) + 1;
+    await chrome.alarms.clear(PHASE_ALARM); // pause: the block can't end while you're in grace
+    await setState(st);
+    await updateBadge(st);
+  }
+  return { ok: true, graceCount: st.graceCount, capped: false };
+}
+
+async function graceEnd() {
+  const st = await getState();
+  if (!st.session || !st.graceStartedAt) return { ok: true };
+  const paused = Date.now() - st.graceStartedAt;
+  st.graceUsedMs = (st.graceUsedMs || 0) + paused;
+  st.graceStartedAt = null;
+  if (st.phase === "work" && st.phaseEndsAt) {
+    st.phaseEndsAt += paused; // resume: the block still delivers its full budgeted work minutes
+    await chrome.alarms.create(PHASE_ALARM, { when: st.phaseEndsAt });
+  }
+  await setState(st);
+  await updateBadge(st);
+  return { ok: true, pausedMs: paused };
 }
 
 async function startSession(opts) {
@@ -137,6 +186,15 @@ async function onPhaseAlarm() {
 async function reconcile() {
   let st = await getState();
   if (!st.session) return;
+  // Settle an in-flight grace pause first (F1): credit the paused time to phaseEndsAt so the normal
+  // catch-up below doesn't advance through a frozen boundary as if the clock had been running.
+  if (st.graceStartedAt) {
+    const paused = Date.now() - st.graceStartedAt;
+    st.graceUsedMs = (st.graceUsedMs || 0) + paused;
+    if (st.phaseEndsAt) st.phaseEndsAt += paused;
+    st.graceStartedAt = null;
+    await setState(st);
+  }
   let changed = false;
   while (st.phaseEndsAt && Date.now() >= st.phaseEndsAt) {
     st = nextPhaseState(st);
@@ -330,7 +388,7 @@ async function enforceOpenTabs() {
 
 // Session-state feedback settings (Epic S): purely client-side presentation, stored in
 // chrome.storage.local (no service round-trip). Sound defaults OFF until opted in.
-const FEEDBACK_DEFAULTS = { sound: false, border: true, borderSec: 10 };
+const FEEDBACK_DEFAULTS = { sound: false, border: true, borderSec: 10, maxGraceMin: 5 };
 async function getFeedback() {
   const { brickFeedback } = await chrome.storage.local.get("brickFeedback");
   return { ...FEEDBACK_DEFAULTS, ...(brickFeedback || {}) };
@@ -469,6 +527,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "testSound": // options-page preview (Epic S3) — plays even while the toggle is off
           await playCue(msg.cue || "work", true);
           sendResponse({ ok: true });
+          break;
+        case "graceStart": // Epic F1 — pause the work clock while the grace overlay is up
+          sendResponse(await graceStart());
+          break;
+        case "graceEnd": // Epic F1 — resume: extend phaseEndsAt by the paused duration
+          sendResponse(await graceEnd());
           break;
         case "startSession":
           sendResponse(await startSession(msg.opts ?? {}));

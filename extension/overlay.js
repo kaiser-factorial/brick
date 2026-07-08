@@ -39,6 +39,8 @@
   #${ROOT_ID} .bo-chip{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);pointer-events:auto;
     background:#14110a;color:#fbd962;border:1px solid #c0392b;border-radius:999px;padding:7px 14px;font-size:12px;
     box-shadow:0 6px 20px rgba(0,0,0,.4)}
+  #${ROOT_ID} .bo-chip.bo-chip-btn{cursor:pointer}
+  #${ROOT_ID} .bo-chip.bo-chip-btn:hover{border-color:#fbd962}
   /* modal card + backdrop (the "back to BRICK MODE" prompt, the clarify card) */
   #${ROOT_ID} .bo-back{position:fixed;inset:0;background:rgba(8,6,2,.55);
     -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);pointer-events:auto}
@@ -119,6 +121,7 @@
    *   glow    {boolean} soft inner glow                      default false
    *   breathe {boolean} slow brightness pulse (reduced-motion disables it)
    *   chip    {string}  bottom-center pill text (interactive)
+   *   onChipClick {function} makes the chip a button (e.g. the grace "back to work" escape hatch)
    *   card    {object}  { tag, title, body, buttons:[{label,kind:'go'|'stay',onClick}], backdrop }
    *   duration{number}  ms until auto fade-out+clear         default null (sticky)
    *   fadeMs  {number}  fade duration                        default 200
@@ -133,6 +136,7 @@
       glow = false,
       breathe = false,
       chip = null,
+      onChipClick = null,
       card = null,
       duration = null,
       fadeMs = 200,
@@ -152,7 +156,9 @@
       layers.push(`<div class="${cls}" style="${style}"></div>`);
     }
     if (chip != null) {
-      layers.push(`<div class="bo-chip">${escapeHtml(chip)}</div>`);
+      layers.push(
+        `<div class="bo-chip${onChipClick ? " bo-chip-btn" : ""}" ${onChipClick ? 'role="button" tabindex="0"' : ""}>${escapeHtml(chip)}</div>`,
+      );
     }
     if (card) {
       const corner = !!card.corner; // corner = non-blocking toast (no backdrop; page stays usable)
@@ -183,6 +189,9 @@
     }
     bo.innerHTML = layers.join("");
 
+    if (onChipClick) {
+      bo.querySelector(".bo-chip")?.addEventListener("click", onChipClick);
+    }
     if (card) {
       // Button/link handlers receive a context with the checkbox state (for "remember").
       const ctx = () => ({ checked: !!bo.querySelector(".bo-checkbox")?.checked });

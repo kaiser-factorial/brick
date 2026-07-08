@@ -340,6 +340,28 @@ early wave (Epics R, 0, U). All on branch `worktree-workload-early-wave` (draft 
 - 🖐 Browser gate: 1-min work/break flip → red/green border ~10s, clicks pass through; one cue per
   flip with several tabs open; toggles persist and take effect; reduced-motion steady fade.
 
+### Epic F — focus-time integrity (F1/F2 DONE, 2026-07-08; browser-verify pending)
+- **F1 pause the work clock** (`background.js` + `content-guard.js`): entering grace clears the
+  phase alarm and records `graceStartedAt`; on exit (chip tap / modal re-prompt / on-task recheck /
+  overlay removal) `phaseEndsAt += pausedMs` and the alarm re-arms — a block always delivers its
+  full budgeted work minutes. Badge shows frozen minutes + `⏸` during a pause. **Per-block cap**
+  (`brickFeedback.maxGraceMin`, default 5, options field): past it `graceStart` returns
+  `capped:true` and the page **hard-blocks**. `reconcile()` settles an in-flight grace first
+  (credits the pause) so worker restarts never advance through a frozen boundary; grace ledger
+  (`graceCount`/`graceUsedMs`) resets on each fresh work block (`nextPhaseState`).
+- **F2 escalating opacity** (`content-guard.js` via U1): vignette fill = `0.22 + 0.12·(count−1)`,
+  capped at 0.6 (never a black-out); resets next work block. The countdown **chip is now clickable**
+  ("tap for back to work →" — overlay.js gains `onChipClick`), so the return control is reachable
+  at every level; reduced-motion handled by the U1 helper.
+- **Verified headlessly:** a **14-check unit test drives the real `background.js` in a vm** (stubbed
+  chrome, controllable clock): pause clears the alarm, 90s+60s detours extend `phaseEndsAt` by
+  exactly 150s, count escalates 1→2→3, the 4th stint past the 5-min cap is refused `capped:true`,
+  work→break keeps the ledger while break→work resets it, and reconcile settles an in-flight grace
+  without advancing the phase. All extension JS `node --check` clean; smoke 37/37 unaffected.
+- 🖐 Browser gate: 3-min work block + two grace detours → full 3 min of actual work (badge shows ⏸
+  during grace); 3× "one more minute" in one block → progressively deeper tint, next block light;
+  cap (set to 1 min) → hard block; chip tap returns at every level.
+
 ### Next up
-- Epics H (help agent) / F (grace-clock integrity), then A→(T,B)→C→D.
+- Epic H (help agent) — last of the early wave — then A→(T,B)→C→D.
 

@@ -35,6 +35,7 @@
 
   let tick = null;
   let graceHandle = null;
+  let graceActive = false; // a grace stint is running → the work clock is paused (Epic F1)
   let clarifiedHref = null; // page already answered/dismissed a clarify card → don't re-nag this load
 
   const stopTick = () => {
@@ -42,14 +43,24 @@
     tick = null;
   };
 
+  // End the current grace stint (if any): tell the background to resume the work clock, crediting
+  // the paused duration to phaseEndsAt (Epic F1). Safe to call when no grace is active.
+  const endGrace = () => {
+    if (!graceActive) return;
+    graceActive = false;
+    chrome.runtime.sendMessage({ type: "graceEnd" }).catch(() => {});
+  };
+
   const removeOverlay = () => {
     stopTick();
+    endGrace();
     graceHandle = null;
     window.BrickOverlay?.clear();
   };
 
   const showModal = (reason) => {
     stopTick();
+    endGrace(); // the re-prompt marks the end of a grace stint — the clock resumes while you decide
     if (!window.BrickOverlay) return; // helper not injected → fail open (no overlay)
     window.BrickOverlay.show({
       card: {
@@ -67,21 +78,41 @@
 
   const graceChip = (left) => {
     const s = String(left % 60).padStart(2, "0");
-    return `🧱 off task — back to work in ${Math.floor(left / 60)}:${s}`;
+    return `🧱 off task — ${Math.floor(left / 60)}:${s} · tap for back to work →`;
   };
 
-  const startGrace = () => {
+  // Escalating opacity (Epic F2): each "one more minute" within the same work block deepens the
+  // tint — lightest first, +0.12 per repeat, capped well short of a black-out. Resets next block
+  // (the background resets graceCount when a fresh work phase starts).
+  const graceFill = (count) => Math.min(0.22 + 0.12 * (Math.max(1, count) - 1), 0.6);
+
+  const startGrace = async () => {
     stopTick();
     if (!window.BrickOverlay) return;
+    // F1: ask the background to pause the work clock. Past the per-block grace cap, grace is no
+    // longer granted — the escalation has maxed out and the page hard-blocks.
+    let res = { ok: true, graceCount: 1 };
+    try {
+      res = (await chrome.runtime.sendMessage({ type: "graceStart" })) || res;
+    } catch {
+      /* background unreachable — grant the visual grace, no pause */
+    }
+    if (res.capped) {
+      hardBlock({ reason: "Grace budget for this work block is used up — back to work." });
+      return;
+    }
+    graceActive = res.ok !== false;
     let left = 60;
     // Grace vignette: red wash + inset border/glow + slow breathing, with a live countdown chip.
+    // The chip doubles as the always-reachable "back to work" control (clickable at every level).
     graceHandle = window.BrickOverlay.show({
       color: WORK_COLOR,
-      fill: 0.22,
+      fill: graceFill(res.graceCount || 1),
       border: 4,
       glow: true,
       breathe: true,
       chip: graceChip(left),
+      onChipClick: goBack,
     });
     tick = setInterval(() => {
       left -= 1;
@@ -95,6 +126,7 @@
   };
 
   const recheck = async () => {
+    endGrace(); // the countdown finished — the stint is over regardless of what the verdict says
     try {
       const res = await chrome.runtime.sendMessage({
         type: "guard",

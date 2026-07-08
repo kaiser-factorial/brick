@@ -88,8 +88,8 @@ $("clearModel").addEventListener("click", () => {
   });
 });
 
-// Session feedback (Epic S3) — purely client-side; persisted to chrome.storage.local.
-const FEEDBACK_DEFAULTS = { sound: false, border: true, borderSec: 10 };
+// Session feedback (Epics S3 + F) — purely client-side; persisted to chrome.storage.local.
+const FEEDBACK_DEFAULTS = { sound: false, border: true, borderSec: 10, maxGraceMin: 5 };
 
 function loadFeedback() {
   chrome.storage.local.get("brickFeedback", ({ brickFeedback }) => {
@@ -97,6 +97,7 @@ function loadFeedback() {
     $("fbBorder").checked = !!fb.border;
     $("fbSound").checked = !!fb.sound;
     $("fbBorderSec").value = String(fb.borderSec);
+    $("fbMaxGrace").value = String(fb.maxGraceMin);
   });
 }
 
@@ -105,9 +106,11 @@ $("saveFeedback").addEventListener("click", () => {
     border: $("fbBorder").checked,
     sound: $("fbSound").checked,
     borderSec: Math.max(1, Math.min(60, Number($("fbBorderSec").value) || 10)),
+    maxGraceMin: Math.max(1, Math.min(60, Number($("fbMaxGrace").value) || 5)),
   };
   chrome.storage.local.set({ brickFeedback }, () => {
     $("fbBorderSec").value = String(brickFeedback.borderSec);
+    $("fbMaxGrace").value = String(brickFeedback.maxGraceMin);
     flash("fbSaved", "saved ✓");
   });
 });
