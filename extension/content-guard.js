@@ -153,11 +153,15 @@
   // hold). Answering writes to the learned store when "remember" is checked; ignoring it fails open
   // (we simply don't re-nag this page load).
   const learn = (decision) => {
-    const unit = pageUnit();
     const msg = { type: "learn", url: location.href, decision, via: "clarify" };
-    if (unit) {
-      msg.scope = "page"; // page-scoped domains learn per video, not per whole site (0.7)
-      msg.unit = unit;
+    // Page-scoped domains learn per video, not per whole site (0.7). Request page scope whenever
+    // the DOMAIN is page-scoped, even if this client's own unit extraction came back empty (e.g. a
+    // youtu.be path-based link) — review fix: the server derives the unit from the URL itself as
+    // the single source of truth, so this no longer silently degrades to domain-scope learning.
+    if (isPageScoped()) {
+      msg.scope = "page";
+      const unit = pageUnit();
+      if (unit) msg.unit = unit; // pass it along as a hint; the server re-derives if absent
     }
     return chrome.runtime.sendMessage(msg).catch(() => {});
   };
@@ -398,7 +402,9 @@
       return;
     }
     // Deepen real Tier-2 verdicts (allow or ask) with the page's title; a stub/Tier-1/3 is final.
-    if (!phase1 || phase1.tier !== "tier2" || phase1.stub) return;
+    // A providerError allow is a fail-open, not a judged verdict (review fix) — treat it like a
+    // stub too, so an outage doesn't spend a second doomed provider call on every navigation.
+    if (!phase1 || phase1.tier !== "tier2" || phase1.stub || phase1.providerError) return;
 
     const deeper = async () => {
       const title = pageSignal();

@@ -6,7 +6,11 @@ const SERVICE = "http://127.0.0.1:7373";
 const DNR_BASE = 1000; // dynamic-rule id offset for brick Tier-1 rules
 const DNR_MAX = 200; // reserved id range [DNR_BASE, DNR_BASE+DNR_MAX)
 const PHASE_ALARM = "brick-phase";
-const TICK_ALARM = "brick-tick"; // fires every minute to refresh the toolbar badge
+const TICK_ALARM = "brick-tick"; // refreshes the badge, rabbit-hole accrual, and plan dispatch
+// ONE tick period always (review fix): the old 1min-plain/0.5min-plan split meant reconcile() (which
+// always re-armed at 1min) silently doubled the escalation-dispatcher's cadence after any restart
+// mid-plan. A single constant removes the desync outright instead of patching each re-arm site.
+const TICK_MINUTES = 0.5;
 const WORK_COLOR = "#c0392b"; // red badge during work
 const BREAK_COLOR = "#2e8b57"; // green badge during break
 
@@ -32,7 +36,9 @@ async function setState(state) {
 
 // The constant visual: a colored countdown badge on the toolbar icon.
 // Red = work, green = break; the number is minutes left in the current phase.
-async function updateBadge(st) {
+// `plan` may be pre-fetched by the caller (the tick handler shares one /plan fetch across
+// consumers — review fix: this used to be fetched again independently here).
+async function updateBadge(st, plan) {
   const s = st ?? (await getState());
   if (!s.session) {
     await chrome.action.setBadgeText({ text: "" });
@@ -45,22 +51,32 @@ async function updateBadge(st) {
   const minsLeft = Math.max(0, Math.ceil(((s.phaseEndsAt ?? ref) - ref) / 60000));
   const isWork = s.phase === "work";
 
-  // Plan-aware badge (Epic A5): during a plan the at-a-glance number is the active block's budget
-  // minutes left (advisory), and the title carries queue position — "2/3 · <focus> · Nm left".
-  const plan = await getPlanCached();
-  if (plan?.activeBlockId && plan.active) {
-    const idx = plan.blocks.findIndex((b) => b.id === plan.activeBlockId) + 1;
-    const rem = plan.active.remainingMinutes != null ? Math.max(0, Math.ceil(plan.active.remainingMinutes)) : minsLeft;
-    const focusTask = plan.blocks[idx - 1]?.focus.task ?? s.session.focus.task;
+  // Plan-aware badge (Epic A5): during a plan WORK phase the at-a-glance number is the active
+  // block's budget minutes left (advisory); during a plan's BREAK the phase countdown wins (review
+  // fix — a plan no longer hides the break timer, which the badge always showed pre-plan).
+  const p = plan !== undefined ? plan : await getPlanCached();
+  if (isWork && p?.activeBlockId && p.active) {
+    const idx = p.blocks.findIndex((b) => b.id === p.activeBlockId) + 1;
+    const rem = p.active.remainingMinutes != null ? Math.max(0, Math.ceil(p.active.remainingMinutes)) : minsLeft;
+    const focusTask = p.blocks[idx - 1]?.focus.task ?? s.session.focus.task;
     // C5: the badge colour tracks the escalation ladder — amber at T-minus, orange at T-0,
-    // deep red in grace overrun. Break colour still wins during breaks.
+    // deep red in grace overrun.
     const ESC_COLOR = { "t-minus": "#d9a441", "t-0": "#e67e22", grace: "#7a1f14" };
-    const color = !isWork ? BREAK_COLOR : ESC_COLOR[plan.active.escalation] ?? WORK_COLOR;
+    const color = ESC_COLOR[p.active.escalation] ?? WORK_COLOR;
     await chrome.action.setBadgeText({ text: s.graceStartedAt ? `${rem}⏸` : String(rem) });
     await chrome.action.setBadgeBackgroundColor({ color });
     await chrome.action.setTitle({
-      title: `BRICK — ${idx}/${plan.blocks.length} · ${focusTask} · ${rem}m left${s.graceStartedAt ? " (paused — grace)" : ""}`,
+      title: `BRICK — ${idx}/${p.blocks.length} · ${focusTask} · ${rem}m left${s.graceStartedAt ? " (paused — grace)" : ""}`,
     });
+    return;
+  }
+  if (!isWork && p?.activeBlockId) {
+    // Plan break: show the queue position but the real phase countdown, not the (irrelevant)
+    // work-block budget.
+    const idx = p.blocks.findIndex((b) => b.id === p.activeBlockId) + 1;
+    await chrome.action.setBadgeText({ text: String(minsLeft) });
+    await chrome.action.setBadgeBackgroundColor({ color: BREAK_COLOR });
+    await chrome.action.setTitle({ title: `BRICK — break · ${minsLeft} min left · next: ${idx}/${p.blocks.length}` });
     return;
   }
 
@@ -164,7 +180,7 @@ async function startSession(opts) {
   await resetRabbitHole(); // fresh per-session foreground-time counters (Epic 0.8)
   await setTier1Rules(true);
   await chrome.alarms.create(PHASE_ALARM, { when: phaseEndsAt });
-  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 });
+  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: TICK_MINUTES });
   await updateBadge(state);
   await broadcastPhase("work");
   await enforceOpenTabs(); // block off-task tabs already open when the session starts
@@ -182,12 +198,15 @@ async function teardownLocal() {
 }
 
 async function stopSession() {
+  // Review fix: tear down local enforcement FIRST (matches the pre-plan-layer ordering). The old
+  // order awaited the service call first, so a wedged (not down — accepted but never answered)
+  // service left Tier-1 rules and the badge running indefinitely after the user pressed stop.
+  await teardownLocal();
   try {
     await api("/session/stop", { method: "POST", body: "{}" });
   } catch {
-    /* service may be down; clear local state regardless */
+    /* service may be down/wedged; local enforcement is already clear regardless */
   }
-  await teardownLocal();
 }
 
 // ---------- plan layer (Epic A5) ----------
@@ -240,65 +259,101 @@ async function pageNotify(payload) {
   }
 }
 
-function blockLabel(plan, id) {
-  return plan.blocks.find((b) => b.id === id)?.focus.task ?? "next block";
-}
-
 function nextLabel(plan) {
   const idx = plan.blocks.findIndex((b) => b.id === plan.activeBlockId);
   const next = plan.blocks.slice(idx + 1).find((b) => b.status === "pending");
   return next ? next.focus.task : "(end of plan)";
 }
 
-async function dispatchNotifications() {
-  const plan = await getPlanCached(true);
+// Record the plan/active-block a message handler just adopted itself, so the next tick's sync
+// check (below) sees no drift and skips a redundant re-adopt (review fix companion — this is what
+// makes the tick-based safety net cheap for the common extension-initiated case).
+async function markPlanSynced(plan) {
   const st = await getDispatchState();
-  if (!plan || !plan.activeBlockId) {
-    if (st.planId) await chrome.storage.local.set({ brickDispatch: { planId: null, lastActiveBlockId: null, notified: {} } });
-    return;
-  }
-  if (st.planId !== plan.id) {
-    st.planId = plan.id;
-    st.lastActiveBlockId = plan.activeBlockId;
-    st.notified = {};
+  st.planId = plan?.id ?? null;
+  st.lastActiveBlockId = plan?.activeBlockId ?? null;
+  await chrome.storage.local.set({ brickDispatch: st });
+}
+
+// `plan` may be pre-fetched by the tick handler (shared with updateBadge — review fix, one /plan
+// fetch per tick instead of two-to-three).
+async function dispatchNotifications(plan) {
+  const p = plan !== undefined ? plan : await getPlanCached(true);
+  const activeId = p?.activeBlockId ?? null;
+  const planId = p?.id ?? null;
+
+  const st = await getDispatchState();
+  const planChanged = st.planId !== planId;
+  const blockChanged = st.lastActiveBlockId !== activeId;
+
+  if (planChanged || blockChanged) {
+    // Keep local enforcement (session anchor, alarms, DNR rules, badge) in sync with the
+    // service's plan state — review fix (root cause 1): this used to only run from the
+    // extension's OWN plan message handlers, so a SERVER-initiated change (watcher auto-advance,
+    // undo firing from a restart, the plan ending on its own) never got picked up locally. Running
+    // this every tick, keyed off the same planId/activeBlockId this function already tracks for
+    // notification dedup, covers every path with one mechanism. adoptServiceSession/teardownLocal
+    // are idempotent enough that a redundant call right after a handler's own (via
+    // markPlanSynced) is harmless — it simply won't happen, since markPlanSynced already caught
+    // the drift up.
+    if (activeId) await adoptServiceSession();
+    else await teardownLocal();
   }
 
+  if (!p || !activeId) {
+    if (st.planId || st.lastActiveBlockId) {
+      await chrome.storage.local.set({ brickDispatch: { planId: null, lastActiveBlockId: null, notified: {} } });
+    }
+    return;
+  }
+
+  if (planChanged) {
+    st.planId = planId;
+    st.notified = {};
+  }
   const fire = (key) => {
     if (st.notified[key]) return false;
     st.notified[key] = true;
     return true;
   };
-  const active = plan.blocks.find((b) => b.id === plan.activeBlockId);
+  const active = p.blocks.find((b) => b.id === activeId);
   const label = active?.focus.task ?? "current block";
-  const next = nextLabel(plan);
+  const next = nextLabel(p);
 
-  // Auto-switch happened (queue moved with an undo window) → announce it.
-  if (st.lastActiveBlockId && st.lastActiveBlockId !== plan.activeBlockId) {
-    if (plan.undo && fire(`${plan.id}:${plan.activeBlockId}:switched`)) {
-      osNotify(`brick-switch-${plan.activeBlockId}`, "BRICK — switched blocks", `Now: ${label}. Undo is available for a few seconds.`);
-      await pageNotify({ title: "Switched blocks", body: `Now: ${label}`, actions: ["undo", "stay"] });
-    }
-    st.lastActiveBlockId = plan.activeBlockId;
+  // A mid-plan swap to a different block within the SAME plan → announce it. Review fix (V8): no
+  // longer gated on `plan.undo` still being present — the undo window (default 30s) and the tick
+  // period can race, and gating on it meant the switch was silently never announced when the
+  // window happened to lapse first. The notification now always fires on a real swap; the undo
+  // action is offered only when actually available.
+  if (!planChanged && blockChanged && fire(`${planId}:${activeId}:switched`)) {
+    const undoNote = p.undo ? " Undo is available for a few seconds." : "";
+    osNotify(`brick-switch-${activeId}`, "BRICK — switched blocks", `Now: ${label}.${undoNote}`);
+    await pageNotify({
+      title: "Switched blocks",
+      body: `Now: ${label}`,
+      actions: p.undo ? ["undo", "stay"] : ["stay"],
+    });
   }
+  st.lastActiveBlockId = activeId;
 
   // Escalation ladder (§6): quiet heads-up → nudge → insistent re-nudge. Once per level.
-  const level = plan.active?.escalation;
-  if (level === "t-minus" && fire(`${plan.id}:${plan.activeBlockId}:t-minus`)) {
+  const level = p.active?.escalation;
+  if (level === "t-minus" && fire(`${planId}:${activeId}:t-minus`)) {
     // Quiet: badge tint + popup banner only — no OS toast, no in-page card.
-    await updateBadge();
-  } else if (level === "t-0" && fire(`${plan.id}:${plan.activeBlockId}:t-0`)) {
-    osNotify(`brick-t0-${plan.activeBlockId}`, "BRICK — time's up", `Time's up on: ${label}. Next: ${next}`);
+    await updateBadge(undefined, p);
+  } else if (level === "t-0" && fire(`${planId}:${activeId}:t-0`)) {
+    osNotify(`brick-t0-${activeId}`, "BRICK — time's up", `Time's up on: ${label}. Next: ${next}`);
     await pageNotify({ title: "Time's up", body: `${label} — next: ${next}`, actions: ["advance", "stay"] });
-    await updateBadge();
-  } else if (level === "grace" && fire(`${plan.id}:${plan.activeBlockId}:grace`)) {
-    osNotify(`brick-grace-${plan.activeBlockId}`, "BRICK — still on the old block", `Over budget on: ${label}. Advance to: ${next}?`);
+    await updateBadge(undefined, p);
+  } else if (level === "grace" && fire(`${planId}:${activeId}:grace`)) {
+    osNotify(`brick-grace-${activeId}`, "BRICK — still on the old block", `Over budget on: ${label}. Advance to: ${next}?`);
     await pageNotify({ title: "Over budget", body: `Still on ${label} — advance to ${next}?`, actions: ["advance", "stay"] });
-    await updateBadge();
+    await updateBadge(undefined, p);
   }
 
   // Manual-mode "ready to advance" (a met condition is waiting for your tap).
-  if (active?.ready && fire(`${plan.id}:${plan.activeBlockId}:ready`)) {
-    osNotify(`brick-ready-${plan.activeBlockId}`, "BRICK — ready to advance", `${label} is ready. Tap "advance now" when you are.`);
+  if (active?.ready && fire(`${planId}:${activeId}:ready`)) {
+    osNotify(`brick-ready-${activeId}`, "BRICK — ready to advance", `${label} is ready. Tap "advance now" when you are.`);
   }
 
   await chrome.storage.local.set({ brickDispatch: st });
@@ -316,8 +371,7 @@ async function adoptServiceSession() {
   await resetRabbitHole();
   await setTier1Rules(true);
   await chrome.alarms.create(PHASE_ALARM, { when: phaseEndsAt });
-  // 30s ticks during a plan — the dispatcher needs to catch escalation boundaries promptly (C2).
-  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 0.5 });
+  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: TICK_MINUTES });
   await updateBadge(state);
   await broadcastPhase("work");
   await enforceOpenTabs();
@@ -369,7 +423,7 @@ async function reconcile() {
   }
   await setTier1Rules(st.phase === "work");
   if (st.phaseEndsAt) await chrome.alarms.create(PHASE_ALARM, { when: st.phaseEndsAt });
-  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 });
+  await chrome.alarms.create(TICK_ALARM, { periodInMinutes: TICK_MINUTES });
   await updateBadge(st);
   if (changed) await broadcastPhase(st.phase);
   if (st.phase === "work") await enforceOpenTabs();
@@ -398,6 +452,9 @@ async function guard(url, title, unit) {
       reason: r.reason,
       tier: r.tier,
       stub: r.stub,
+      // Review fix: a fail-open from a provider outage is NOT a judged verdict — content-guard
+      // treats it like a stub (skip the phase-2 re-check; don't spend a second doomed call).
+      providerError: r.providerError,
     };
   } catch {
     // Fail open — never block real work because the service is unreachable.
@@ -418,30 +475,56 @@ async function getConfigCached() {
 // Rabbit-hole time nudge (Epic 0.8): accrue foreground minutes per flagged domain *only while its
 // tab is active during work*, and fire a check-in each time a threshold multiple is crossed.
 async function accrueRabbitHole() {
+  const store = (await chrome.storage.local.get("brickRabbit")).brickRabbit || {
+    mins: {},
+    nudged: {},
+    lastAt: 0,
+    lastDomain: null,
+  };
+  // Not actively accruing this tick — clear the "last tick" anchor so a future match starts
+  // counting from zero elapsed instead of folding in the whole inactive gap (review fix: below,
+  // elapsed time is measured since this anchor, so it must never span a period we weren't watching).
+  const bail = async () => {
+    if (store.lastAt) {
+      store.lastAt = 0;
+      store.lastDomain = null;
+      await chrome.storage.local.set({ brickRabbit: store });
+    }
+  };
+
   const st = await getState();
-  if (!st.session || st.phase !== "work") return;
+  if (!st.session || st.phase !== "work") return bail();
   let cfg;
   try {
     cfg = await getConfigCached();
   } catch {
-    return;
+    return bail();
   }
   // Default flagged domain is YouTube (design §14.8); an explicit empty list disables the nudge.
   const domains = cfg.settings?.rabbitHoleDomains ?? ["youtube.com"];
   const threshold = cfg.settings?.rabbitHoleMinutes || 45;
-  if (!domains.length) return;
+  if (!domains.length) return bail();
   let tab;
   try {
     [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   } catch {
-    return;
+    return bail();
   }
-  if (!tab || !tab.url || !tab.url.startsWith("http")) return;
+  if (!tab || !tab.url || !tab.url.startsWith("http")) return bail();
   const host = hostOf(tab.url);
   const flagged = domains.find((d) => host === d || host.endsWith("." + d));
-  if (!flagged) return;
-  const store = (await chrome.storage.local.get("brickRabbit")).brickRabbit || { mins: {}, nudged: {} };
-  store.mins[flagged] = (store.mins[flagged] || 0) + 1; // one TICK_ALARM ≈ one active minute
+  if (!flagged) return bail();
+
+  // Accrue by ACTUAL elapsed time since the last CONSECUTIVE matching tick, not a fixed "1 minute
+  // per tick" (review fix: the tick period isn't 1 minute during plans, and this stays correct
+  // even if the period ever changes again). Only counts when the anchor is from the SAME domain —
+  // switching flagged domains, or a gap where accrual bailed, starts this tick's elapsed at zero.
+  const now = Date.now();
+  const elapsedMin =
+    store.lastAt && store.lastDomain === flagged ? Math.max(0, (now - store.lastAt) / 60000) : 0;
+  store.lastAt = now;
+  store.lastDomain = flagged;
+  store.mins[flagged] = (store.mins[flagged] || 0) + elapsedMin;
   const level = Math.floor(store.mins[flagged] / threshold);
   if (level >= 1 && (store.nudged[flagged] || 0) < level) {
     store.nudged[flagged] = level; // dedup: one nudge per threshold crossing
@@ -449,7 +532,7 @@ async function accrueRabbitHole() {
       await chrome.tabs.sendMessage(tab.id, {
         type: "brick:rabbithole",
         domain: flagged,
-        minutes: store.mins[flagged],
+        minutes: Math.round(store.mins[flagged]),
       });
     } catch {
       /* no content script in that tab */
@@ -542,7 +625,10 @@ async function enforceOpenTabs() {
   } catch {
     return;
   }
-  for (const tab of tabs) await enforceTab(tab, true); // passive sweep → soft (grace)
+  // Review fix: independent per-tab adjudications ran strictly sequentially — 20 tabs with tier-2
+  // pages meant 20 back-to-back model calls (tens of seconds) before session start / work
+  // re-engage finished sweeping. They don't depend on each other, so run them concurrently.
+  await Promise.all(tabs.map((tab) => enforceTab(tab, true))); // passive sweep → soft (grace)
 }
 
 // Session-state feedback settings (Epic S): purely client-side presentation, stored in
@@ -599,13 +685,19 @@ async function broadcastPhase(phase) {
   }
 }
 
+// One shared /plan fetch per tick (review fix): updateBadge and dispatchNotifications each used to
+// fetch it independently (up to 2-3 requests/tick during a plan) for the identical snapshot.
+async function onTick() {
+  const plan = await getPlanCached(true);
+  await updateBadge(undefined, plan);
+  await accrueRabbitHole(); // Epic 0.8 — count active-during-work time on flagged domains
+  await dispatchNotifications(plan); // Epic C2 — escalation/switch/ready events, once each; also
+  // the root-cause-1 sync check (re-adopts/tears down local state to match the service's plan).
+}
+
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === PHASE_ALARM) onPhaseAlarm();
-  else if (a.name === TICK_ALARM) {
-    updateBadge();
-    accrueRabbitHole(); // Epic 0.8 — count active-during-work time on flagged domains
-    dispatchNotifications(); // Epic C2 — escalation/switch/ready events, once each
-  }
+  else if (a.name === TICK_ALARM) onTick();
 });
 chrome.runtime.onStartup.addListener(reconcile);
 chrome.runtime.onInstalled.addListener(reconcile);
@@ -633,7 +725,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse(await api("/projects"));
           break;
         case "getConfig":
-          sendResponse(await api("/config"));
+          // Review fix: content-guard sends this on EVERY page load (to read pageScopeDomains) —
+          // route it through the same 30s cache accrueRabbitHole already uses instead of a fresh
+          // service round-trip (+ a full decisionCounts scan) per navigation.
+          sendResponse(await getConfigCached());
           break;
         case "saveTiers":
           sendResponse(
@@ -710,6 +805,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const r = await api("/plan/start", { method: "POST", body: JSON.stringify(msg.opts ?? {}) });
           planCache = { at: 0, plan: null };
           await adoptServiceSession();
+          await markPlanSynced(r.plan); // tells the next tick's sync check there's no drift to fix
           sendResponse(r);
           break;
         }
@@ -721,21 +817,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           planCache = { at: 0, plan: null };
           if (r.plan && r.plan.activeBlockId) await adoptServiceSession();
           else await teardownLocal(); // last block advanced → plan over
+          await markPlanSynced(r.plan);
           sendResponse(r);
           break;
         }
-        case "planStep":
-          sendResponse(
-            await api("/plan/block/step", {
-              method: "POST",
-              body: JSON.stringify({ blockId: msg.blockId, stepId: msg.stepId }),
-            }),
-          );
+        case "planStep": {
+          const r = await api("/plan/block/step", {
+            method: "POST",
+            body: JSON.stringify({ blockId: msg.blockId, stepId: msg.stepId }),
+          });
+          planCache = { at: 0, plan: null }; // review fix: this was the one plan mutator that didn't
+          sendResponse(r);
           break;
+        }
         case "planEnd": {
           const r = await api("/plan/end", { method: "POST", body: "{}" });
           planCache = { at: 0, plan: null };
           await teardownLocal();
+          await markPlanSynced(null);
           sendResponse(r);
           break;
         }
@@ -744,6 +843,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const r = await api("/plan/undo-advance", { method: "POST", body: "{}" });
           planCache = { at: 0, plan: null };
           await adoptServiceSession();
+          await markPlanSynced(r.plan);
           sendResponse(r);
           break;
         }
@@ -754,6 +854,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const r = await api("/plan/from-template", { method: "POST", body: JSON.stringify(msg.opts ?? {}) });
           planCache = { at: 0, plan: null };
           await adoptServiceSession();
+          await markPlanSynced(r.plan);
           sendResponse(r);
           break;
         }
