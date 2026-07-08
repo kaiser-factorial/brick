@@ -22,6 +22,7 @@ import {
   endSession,
   getSession,
   recordAdjudication,
+  refocusSession,
   setPhase,
   startSession,
 } from "./session.js";
@@ -265,6 +266,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
     case "POST /session/stop":
       return sendJson(res, 200, { session: await endSession() });
+
+    case "POST /session/refocus": {
+      const body = await readJson(req);
+      const task = str(body, "task");
+      if (!task) return sendJson(res, 400, { error: "task required" });
+      return sendJson(res, 200, { session: await refocusSession(task) });
+    }
 
     case "POST /adjudicate": {
       const body = await readJson(req);

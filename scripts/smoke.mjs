@@ -111,7 +111,10 @@ try {
   check("learned block beats tier3 allow", t3blocked.decision === "block" && t3blocked.via === "learned");
 
   const cfgCounts = (await get("/config")).decisions;
-  check("gatekeeper readout counts corrections", cfgCounts.correction === 1 && cfgCounts.total === 3);
+  check(
+    "gatekeeper readout counts clarify + corrections",
+    cfgCounts.correction === 1 && cfgCounts.clarify === 2 && cfgCounts.total === 3,
+  );
 
   // Clear resets the store — the learned nytimes allow no longer short-circuits.
   const cleared = await post("/decisions/clear");
@@ -132,6 +135,15 @@ try {
   // Session lifecycle (explicit focus — no ledger needed).
   const start = await post("/session/start", { task: TASK });
   check("session starts", Boolean(start.session && start.session.id));
+
+  // Refocus (Epic 0.3 "make focus more specific") updates the active session's focus.
+  const refocused = await post("/session/refocus", { task: "tighten: p-values in the ADHD dataset" });
+  check(
+    "refocus updates the session focus",
+    Boolean(refocused.session) &&
+      refocused.session.focus.task.startsWith("tighten") &&
+      refocused.session.focus.source === "explicit",
+  );
 
   const prep = await post("/prepend", {});
   check("prepend uses session focus", typeof prep.header === "string" && prep.header.includes("BRICK MODE"));
