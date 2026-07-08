@@ -17,9 +17,34 @@ immediately. The work/break minutes fields above apply to the whole plan's Pomod
 ## Budgets are advisory
 
 A block's minutes are an attention allocation, not a hard stop: when the budget runs out nothing is
-blocked and the queue does not move on its own — the popup shows "over by Nm" and the decision to
-move on stays yours. (Automatic swap policies and stop-condition detection are planned but not
-built yet.)
+blocked — the block is marked ready ("advance now" lights up in the popup) and the decision to move
+on stays yours, unless the block's swap mode says otherwise.
+
+## Stop conditions — "done when I push"
+
+A block can carry auto-detected stop conditions: **git** (a ref advanced, a merge landed, or a
+commit message matching a pattern — e.g. "done when I push"), **ledger** (the project's Next Action
+changed — advancing the project in Ledger is the completion signal), **command** (a shell command
+exits successfully — off by default, enabled only with the BRICK_ALLOW_COMMAND_CONDITIONS
+environment flag), and **manual** (always available — the popup's advance is the escape hatch).
+The service polls the active block's conditions about every 30 seconds. Detection never
+false-completes: a broken repo or failing check simply never fires, and a met condition stays met.
+
+## Swap modes — what actually advances the queue
+
+Each block's swap mode combines its budget and conditions: **condition** (swap when the condition
+is met; budget only nudges), **time** (swap intent at the budget; conditions tracked but don't
+drive), **first** (whichever comes first — the default when a block has both), **both** (a
+minimum-time floor: at least the budget AND the condition). Time-driven swaps always land as a
+nudge — the queue never silently flips because a clock ran out.
+
+## Advance mode — auto with undo, or manual
+
+When a stop-condition is met, the **advance mode** setting (options page) decides what happens:
+**auto** (default) advances the queue immediately and offers an **↩ undo switch** button in the
+popup for a configurable window (default 30s) — undoing returns you to the block, marked ready, and
+it won't auto-fire again; **manual** just lights up **advance now** and waits for your tap. A block
+can override the global setting.
 
 ## Advancing, steps, and the queue
 

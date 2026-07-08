@@ -455,3 +455,36 @@ Branch `workload-plan-layer` (off master post-merge of PR #1).
   plan alternates; save a hand-built plan → relaunch parity; delete from options removes it from
   the popup picker.
 
+## Plan layer — Epic B (watchers, swap policy, advance mode) — DONE 2026-07-08
+- **B1 watchers** (`src/watchers.ts`): `Evaluator {arm/poll}` per stop-condition on the ACTIVE
+  block. `git` (head-advanced vs a baseline SHA / merge-commit since arm / message-match since
+  arm), `ledger` (nextAction diff via `fetchProjects` — advancing the project in Ledger IS the
+  signal), `command` (**gated on `BRICK_ALLOW_COMMAND_CONDITIONS`**, 15s timeout), `manual`
+  (no poller). All fail-open (error/broken-repo → never fires; no baseline → refuses to guess) and
+  monotonic (met stays met). Interval loop in `plan-runtime` (`BRICK_WATCH_INTERVAL_MS` default
+  30s, unref'd), met flags persisted into the plan on change.
+- **B2 swap policy**: pure `decideSwap` (`condition|time|first|both` per §12) + `deriveSwapMode`
+  (both present → `first`) + `conditionsSatisfied` (Appendix A: stepsGate && any/all policy;
+  neither present → never).
+- **B3 advance mode + undo**: `BrickSettings` += `advanceMode` (default auto) + `undoWindowSec`
+  (default 30, clamped 5–600); per-block `advanceMode` override; blocks gain `ready`. Condition-
+  driven fire → **auto**: snapshot → advance → undo window (`POST /plan/undo-advance` restores,
+  re-anchors the session, marks the block ready and **suppresses re-fire** — no undo→advance loop);
+  **manual**: `ready:true`, queue waits. **Time-driven fire → always the nudge path** (`ready`,
+  never a silent flip — §12; Epic C escalates it). `/plan/start` accepts `stopConditions` (validated
+  shapes) + per-block `advanceMode`. One swap decision per block instance (fired-set dedup).
+- **B4 UI**: options gains **Plan advance mode** (auto/manual radios + undo-seconds, disabled when
+  manual); popup: "advance now → · ready" amber glow + **↩ undo switch** during the window
+  (Epic C polishes visuals).
+- **B5 verification — smoke 106/106** (29 new, all key-free): §12 truth table (4×4), derive
+  defaults, conditionsSatisfied gates; git evaluator on a real scratch repo (baseline → commit →
+  met → monotonic; message-match; broken repo never fires), command gating (off by default, exit
+  codes, expectExit), **fake `LEDGER_BIN`** fixture (baseline/change/revert-stays-met); live
+  integration at 150ms ticks: auto-advance + undo + **no re-fire after undo**, manual ready + tap,
+  time → ready-not-flip, ledger next-action change auto-advances, settings round-trip.
+- 🖐 Browser gate (Phase B): real repo + `swapMode:first` block — push a commit → auto-advance with
+  undo; manual mode → advance-now glows; real `LEDGER_BIN` next-action change completes a block
+  (the one check the fake can't cover).
+- NOTE: real Ledger repos live at `~/Projects/ledger_root/{ledger,ledger-cli,ledger-mcp}` — the
+  handoff's `../ledger/...` sibling paths are stale; matters for Epic D.
+
