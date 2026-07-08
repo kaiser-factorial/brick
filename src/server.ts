@@ -7,6 +7,7 @@ import { buildPrependHeader, wrapMessage } from "./prepend.js";
 import { classify } from "./tiers.js";
 import { groundingEnabled } from "./grounding.js";
 import { loadSettings, loadTiers, resetTiers, saveSettings, saveTiers } from "./config-store.js";
+import type { BrickSettings } from "./config-store.js";
 import { activeProviderName, providerHasKey, selectProvider } from "./providers/index.js";
 import {
   clearDecisions,
@@ -215,9 +216,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
     case "POST /config/settings": {
       const body = await readJson(req);
-      const patch: { model?: string } = {};
+      const patch: BrickSettings = {};
       // Accept a model override; a blank string clears it (revert to the seed).
       if (typeof body.model === "string") patch.model = body.model;
+      if (Array.isArray(body.pageScopeDomains)) patch.pageScopeDomains = body.pageScopeDomains as string[];
+      if (Array.isArray(body.rabbitHoleDomains)) patch.rabbitHoleDomains = body.rabbitHoleDomains as string[];
+      if (typeof body.rabbitHoleMinutes === "number") patch.rabbitHoleMinutes = body.rabbitHoleMinutes;
       settings = await saveSettings(patch);
       return sendJson(res, 200, { settings, model: effectiveModel() });
     }
@@ -346,6 +350,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         unit,
         decision,
         via,
+        sampleUrl: target,
       });
       decisions = await loadDecisions();
       return sendJson(res, 200, { learned: record, counts: decisionCounts(decisions) });

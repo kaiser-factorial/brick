@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
+  decisionsToCases,
   domainUnit,
   findLearned,
   focusKeyOf,
@@ -55,8 +56,17 @@ const list = [
 check("findLearned: domain hit", findLearned(list, "proj_1", "https://www.nytimes.com/x")?.decision === "allow");
 check("findLearned: wrong focusKey misses", findLearned(list, "proj_9", "https://nytimes.com") === null);
 check("findLearned: page-scope preferred over domain", findLearned(list, "proj_1", "https://nytimes.com", "vid123")?.scope === "page");
+// 0.7: a page-scope block on one video must not leak to other videos (falls back to the domain entry).
+check("findLearned: page block doesn't leak to other videos", findLearned(list, "proj_1", "https://nytimes.com", "OTHERVID")?.decision === "allow");
 check("focusKeyOf: projectId wins over task", focusKeyOf({ task: "x", source: "explicit", projectId: "p9" }) === "p9");
 check("domainUnit: strips www", domainUnit("https://www.example.com/a?b=1") === "example.com");
+
+// 0.6: corrections/clarifies → eval cases (uses sampleUrl; page entries without a URL are dropped).
+const cases06 = decisionsToCases([
+  { focusKey: "proj", scope: "domain", unit: "nytimes.com", decision: "block", via: "correction", at: "", sampleUrl: "https://nytimes.com/x" },
+  { focusKey: "proj", scope: "page", unit: "vid1", decision: "allow", via: "clarify", at: "" },
+]);
+check("0.6 decisionsToCases maps a correction to a scored case", cases06.length === 1 && cases06[0].task === "proj" && cases06[0].expected === "block" && cases06[0].url === "https://nytimes.com/x");
 
 // ---------- integration: the running service ----------
 let dataDir;
@@ -131,6 +141,20 @@ try {
   check("adjudicate response surfaces the model", t1model.model === "test/model-x");
   const clearedModel = await post("/config/settings", { model: "" });
   check("clearing the model reverts to the seed", clearedModel.model === seed);
+
+  // Focus-tuning settings (0.7/0.8) persist + merge (model stays cleared).
+  const tune = await post("/config/settings", { pageScopeDomains: ["youtube.com", "vimeo.com"], rabbitHoleMinutes: 2 });
+  check(
+    "focus-tuning settings persist",
+    tune.settings.pageScopeDomains.includes("vimeo.com") && tune.settings.rabbitHoleMinutes === 2,
+  );
+  check("GET /config reflects focus tuning", (await get("/config")).settings.pageScopeDomains.includes("vimeo.com"));
+
+  // 0.7: a page-scope learned allow short-circuits for its video (unit) with no model call.
+  await post("/decisions/learn", { task: TASK, url: "https://youtube.com/watch?v=abc", decision: "allow", via: "clarify", scope: "page", unit: "abc" });
+  const pv = await post("/adjudicate", { url: "https://youtube.com/watch?v=abc", task: TASK, unit: "abc" });
+  check("page-scope learned allow short-circuits its video", pv.via === "learned" && pv.decision === "allow");
+  await post("/decisions/clear");
 
   // Session lifecycle (explicit focus — no ledger needed).
   const start = await post("/session/start", { task: TASK });

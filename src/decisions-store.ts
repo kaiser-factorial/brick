@@ -18,6 +18,7 @@ export interface LearnedDecision {
   decision: "allow" | "block";
   via: "clarify" | "correction";
   at: string; // ISO timestamp
+  sampleUrl?: string; // the URL that produced this entry — lets 0.6 rebuild exact eval cases
 }
 
 const DATA_DIR =
@@ -141,6 +142,21 @@ export function resolvePrecedence(tier: Tier, learned: LearnedDecision | null): 
     return { decision: "allow", reason: "Tier-3 always-allowed site.", confidence: 1, via: "tier3" };
   }
   return null; // fall through to the model
+}
+
+/** Convert learned decisions into eval cases (task, url, expected) so `npm run eval` can score
+ *  accuracy against your real clarify answers + corrections (Epic 0.6). Uses the captured
+ *  `sampleUrl` when present, else reconstructs a domain URL from the unit. */
+export function decisionsToCases(
+  list: LearnedDecision[],
+): Array<{ task: string; url: string; expected: "allow" | "block" }> {
+  return list
+    .map((e) => ({
+      task: e.focusKey,
+      url: e.sampleUrl || (e.scope === "domain" && e.unit ? `https://${e.unit}` : ""),
+      expected: e.decision,
+    }))
+    .filter((c) => c.url); // drop page-scope entries with no captured URL (can't rebuild)
 }
 
 /** Provenance/decision counts for the options-page gatekeeper readout (Epic 0.5 surfaces these). */
