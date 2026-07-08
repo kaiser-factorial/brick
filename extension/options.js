@@ -53,9 +53,31 @@ function load() {
     $("pageScope").value = (s.pageScopeDomains || ["youtube.com"]).join("\n");
     $("rabbitDomains").value = (s.rabbitHoleDomains || ["youtube.com"]).join("\n");
     $("rabbitMins").value = String(s.rabbitHoleMinutes || 45);
+    const mode = s.advanceMode || "auto";
+    $("advAuto").checked = mode === "auto";
+    $("advManual").checked = mode === "manual";
+    $("undoSec").value = String(s.undoWindowSec || 30);
+    $("undoSec").disabled = mode === "manual"; // only the auto path uses the undo window
     renderGatekeeper(cfg.decisions);
   });
 }
+
+// Plan advance mode (Epic B4): auto-with-undo vs manual "advance now".
+for (const id of ["advAuto", "advManual"]) {
+  $(id).addEventListener("change", () => {
+    $("undoSec").disabled = $("advManual").checked;
+  });
+}
+$("saveAdvance").addEventListener("click", () => {
+  const settings = {
+    advanceMode: $("advManual").checked ? "manual" : "auto",
+    undoWindowSec: Math.max(5, Math.min(600, Number($("undoSec").value) || 30)),
+  };
+  chrome.runtime.sendMessage({ type: "saveSettings", settings }, (res) => {
+    if (!res || res.error) return flash("advSaved", "save failed: " + ((res && res.error) || "unknown"), 3000);
+    flash("advSaved", "saved ✓");
+  });
+});
 
 function renderGatekeeper(d) {
   d = d || { total: 0, allow: 0, block: 0, clarify: 0, correction: 0 };

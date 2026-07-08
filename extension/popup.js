@@ -59,6 +59,15 @@ async function renderPlan() {
   }
 
   const block = plan.blocks[idx];
+
+  // Epic B: "advance now" glows when a swap trigger fired and waits for the tap; an undo button
+  // appears during the auto-advance undo window.
+  const adv = $("planAdvance");
+  adv.textContent = block.ready ? "advance now → · ready" : "advance now →";
+  adv.style.borderColor = block.ready ? "var(--amber)" : "";
+  adv.style.color = block.ready ? "var(--amber)" : "";
+  $("planUndo").classList.toggle("hidden", !plan.undo);
+
   const steps = $("planSteps");
   steps.textContent = "";
   if (block.steps && block.steps.length) {
@@ -219,6 +228,11 @@ $("planAdvance").addEventListener("click", async () => {
 
 $("planEnd").addEventListener("click", async () => {
   await send({ type: "planEnd" });
+  render();
+});
+
+$("planUndo").addEventListener("click", async () => {
+  await send({ type: "planUndo" });
   render();
 });
 

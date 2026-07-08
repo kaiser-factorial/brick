@@ -634,6 +634,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse(r);
           break;
         }
+        case "planUndo": {
+          // Revert the last auto-advance (Epic B3) and re-adopt the restored block's session.
+          const r = await api("/plan/undo-advance", { method: "POST", body: "{}" });
+          planCache = { at: 0, plan: null };
+          await adoptServiceSession();
+          sendResponse(r);
+          break;
+        }
         case "getTemplates":
           sendResponse(await api("/templates"));
           break;
