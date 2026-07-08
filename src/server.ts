@@ -12,6 +12,7 @@ import { activeProviderName, providerHasKey, selectProvider } from "./providers/
 import {
   clearDecisions,
   decisionCounts,
+  derivePageUnit,
   domainUnit,
   findLearned,
   focusKeyOf,
@@ -86,6 +87,9 @@ const PROVIDER = activeProviderName();
 // on top — a saved model wins, and clearing it reverts to this seed.
 const SEED_MODEL = process.env.BRICK_MODEL ?? selectProvider().defaultModel;
 const hasApiKey = (): boolean => providerHasKey();
+// Review fix: the most recent adjudicator fail-open, so an outage is observable on /health instead
+// of looking identical to the model genuinely allowing every page.
+let lastProviderError: { at: string; reason: string } | null = null;
 
 // Tier config: persisted (.data/tiers.json), editable via the options page / POST /config/tiers.
 let tiers = await loadTiers();
@@ -264,6 +268,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         model: effectiveModel(),
         hasApiKey: hasApiKey(),
         grounding: groundingEnabled(),
+        lastProviderError,
       });
 
     case "GET /config":
@@ -276,6 +281,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         hasApiKey: hasApiKey(),
         grounding: groundingEnabled(),
         decisions: decisionCounts(decisions),
+        lastProviderError,
       });
 
     case "POST /config/settings": {
@@ -352,7 +358,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       const tier = classify(target, tiers);
       const focusKey = focusKeyOf(focus);
       // A per-page unit (e.g. a YouTube video id) lets high-variance domains learn per page (0.7).
-      const pageUnit = str(body, "unit");
+      // DERIVED SERVER-SIDE when the caller didn't send one (review fix): the background worker's
+      // tab-activation re-check never computed it, so a page-scope allow was invisible to it.
+      // Deriving it once here, from the target URL, makes every caller correct automatically.
+      const pageUnit =
+        str(body, "unit") ?? derivePageUnit(target, settings.pageScopeDomains ?? ["youtube.com", "youtu.be"]);
       const learned = findLearned(decisions, focusKey, target, pageUnit);
       // Precedence: Tier-1 block > learned block > learned allow > Tier-3 allow > model (0.2).
       const pre = resolvePrecedence(tier, learned);
@@ -365,6 +375,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         via?: string;
         learned?: boolean;
         model?: string;
+        providerError?: boolean;
       };
       if (pre) {
         result = {
@@ -390,7 +401,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           title: str(body, "title"),
           model: effectiveModel(),
         });
-        result = { decision: r.decision, reason: r.reason, confidence: r.confidence, stub: false, model: r.model };
+        result = {
+          decision: r.decision,
+          reason: r.reason,
+          confidence: r.confidence,
+          stub: false,
+          model: r.model,
+          providerError: r.providerError,
+        };
+        // Review fix: a fail-open from a provider outage is NOT a judged verdict — track it so
+        // /health can surface an outage instead of it looking like silent, permanent allow.
+        if (r.providerError) lastProviderError = { at: new Date().toISOString(), reason: r.reason };
       }
 
       await recordAdjudication(target, result.decision, tier);
@@ -404,10 +425,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         return sendJson(res, 400, { error: "decision must be allow|block" });
       }
       const target = str(body, "url");
-      const scope = str(body, "scope") === "page" ? "page" : "domain";
       const via = str(body, "via") === "correction" ? "correction" : "clarify";
-      // Page-scope needs an explicit unit (e.g. video id); domain-scope derives it from the URL.
-      const unit = str(body, "unit") ?? (target ? domainUnit(target) : undefined);
+      // Page-scope derives the unit server-side when the caller didn't send one (review fix: the
+      // client's own video-id extraction misses some URL shapes, e.g. youtu.be — deriving it here,
+      // the same way /adjudicate does, is the single source of truth instead of two copies
+      // drifting). If page scope was requested but no unit can be derived (an unknown page-scoped
+      // domain, or a stale client/server settings snapshot), downgrade to domain scope explicitly
+      // rather than writing a scope:"page" entry keyed by a domain-shaped unit.
+      const wantsPage = str(body, "scope") === "page";
+      const explicitUnit = str(body, "unit");
+      const derivedPageUnit =
+        wantsPage && !explicitUnit && target
+          ? derivePageUnit(target, settings.pageScopeDomains ?? ["youtube.com", "youtu.be"])
+          : undefined;
+      const scope = wantsPage && (explicitUnit || derivedPageUnit) ? "page" : "domain";
+      const unit =
+        scope === "page" ? explicitUnit ?? derivedPageUnit : target ? domainUnit(target) : undefined;
       if (!unit) return sendJson(res, 400, { error: "url or unit required" });
       const focus = await focusFor(body);
       const record = await learnDecision({
@@ -454,6 +487,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           steps: Array.isArray(b.steps) ? (b.steps as unknown[]).map(String).slice(0, 20) : undefined,
           stopConditions: parseStopConditions(b.stopConditions),
           advanceMode: b.advanceMode === "auto" || b.advanceMode === "manual" ? b.advanceMode : undefined,
+          completionPolicy: b.completionPolicy === "all" ? "all" : b.completionPolicy === "any" ? "any" : undefined,
           repeat:
             b.repeat && typeof b.repeat === "object"
               ? {
@@ -508,6 +542,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           focus: { task, source: "explicit" },
           budgetMinutes: typeof insertRaw.budgetMinutes === "number" ? insertRaw.budgetMinutes : undefined,
           steps: Array.isArray(insertRaw.steps) ? (insertRaw.steps as unknown[]).map(String) : undefined,
+          stopConditions: parseStopConditions(insertRaw.stopConditions),
+          advanceMode: insertRaw.advanceMode === "auto" || insertRaw.advanceMode === "manual" ? insertRaw.advanceMode : undefined,
+          completionPolicy: insertRaw.completionPolicy === "all" ? "all" : insertRaw.completionPolicy === "any" ? "any" : undefined,
         };
       }
       const plan = await editPlan({
@@ -586,6 +623,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           steps: b.steps,
           repeat: b.repeat,
           swapMode: b.swapMode,
+          stopConditions: b.stopConditions,
+          advanceMode: b.advanceMode,
+          completionPolicy: b.completionPolicy,
         });
       }
       const plan = await startPlan({
