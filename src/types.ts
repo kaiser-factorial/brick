@@ -93,6 +93,11 @@ export interface WorkBlock {
   steps?: Step[]; // optional intra-block checklist
   repeat?: RepeatSpec;
   swapMode?: SwapMode; // default derived: both present → "first"; else the one present
+  /** Per-block override of the global advance-mode setting (§8.1). */
+  advanceMode?: "auto" | "manual";
+  /** Set when a swap trigger fired but the queue is waiting for your tap (manual mode, or a
+   *  time-driven nudge, or after an undo). The popup's "advance now" lights up on it. */
+  ready?: boolean;
   status: BlockStatus;
   startedAt?: string;
   completedAt?: string;

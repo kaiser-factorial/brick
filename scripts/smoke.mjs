@@ -5,7 +5,8 @@
 // tiers, empty learned store) and every check drives the focus with an explicit `task` — so the
 // suite needs neither a reachable ledger binary nor an API key (tier-2 falls to the stub path, and
 // learned/tier short-circuits never call a model).
-import { spawn } from "node:child_process";
+import { FAKE_LEDGER, setLedgerProjects } from "./smoke-env.mjs"; // MUST be first (sets LEDGER_BIN)
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,8 @@ import {
 } from "../dist/decisions-store.js";
 import { loadCorpus, retrieveChunks } from "../dist/help.js";
 import { expandTemplate, liftPlanToTemplate } from "../dist/template-store.js";
+import { conditionsSatisfied, decideSwap, deriveSwapMode } from "../dist/plan-runtime.js";
+import { makeEvaluator } from "../dist/watchers.js";
 
 const PORT = process.env.SMOKE_PORT ?? "7399";
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -154,6 +157,104 @@ check(
     lifted.blocks[0].steps?.[0] === "draft",
 );
 
+// ---------- unit: swap-policy combinator (Epic B2, §12 truth table) — pure ----------
+{
+  // combos are (conditionMet, timeUp): FF, FT, TF, TT
+  const TABLE = {
+    condition: [false, false, true, true],
+    time: [false, true, false, true],
+    first: [false, true, true, true],
+    both: [false, false, false, true],
+  };
+  let ok = true;
+  for (const [mode, exp] of Object.entries(TABLE)) {
+    const got = [
+      decideSwap(mode, false, false),
+      decideSwap(mode, false, true),
+      decideSwap(mode, true, false),
+      decideSwap(mode, true, true),
+    ];
+    if (got.join() !== exp.join()) ok = false;
+  }
+  check("decideSwap matches the §12 truth table (4 modes × 4 combos)", ok);
+  check(
+    "deriveSwapMode defaults: both→first, budget→time, conds→condition",
+    deriveSwapMode({ budgetMinutes: 60, stopConditions: [{ type: "manual", met: false }] }) === "first" &&
+      deriveSwapMode({ budgetMinutes: 60 }) === "time" &&
+      deriveSwapMode({ stopConditions: [{ type: "manual", met: false }] }) === "condition",
+  );
+  check(
+    "conditionsSatisfied: neither→never, steps gate, any/all policies",
+    conditionsSatisfied({}) === false &&
+      conditionsSatisfied({ steps: [{ id: "s", label: "x", done: true }] }) === true &&
+      conditionsSatisfied({ stopConditions: [{ type: "manual", met: true }, { type: "manual", met: false }] }) === true &&
+      conditionsSatisfied({ completionPolicy: "all", stopConditions: [{ type: "manual", met: true }, { type: "manual", met: false }] }) === false &&
+      conditionsSatisfied({ steps: [{ id: "s", label: "x", done: false }], stopConditions: [{ type: "manual", met: true }] }) === false,
+  );
+}
+
+// ---------- unit: evaluators on a real scratch git repo + the fake ledger (Epic B1) ----------
+const gitDir = await mkdtemp(join(tmpdir(), "brick-git-"));
+const g = (...args) =>
+  execFileSync("git", ["-C", gitDir, "-c", "user.email=s@s", "-c", "user.name=smoke", ...args], { stdio: "pipe" });
+g("init", "-q");
+g("commit", "--allow-empty", "-q", "-m", "init");
+{
+  // head-advanced: flips ONLY after a real commit; stays met.
+  const cond = { type: "git", repoPath: gitDir, predicate: { kind: "head-advanced", ref: "HEAD" }, met: false };
+  const ev = makeEvaluator(cond);
+  await ev.arm({}, cond);
+  check("git head-advanced: not met at baseline", (await ev.poll()) === false);
+  g("commit", "--allow-empty", "-q", "-m", "work done");
+  check("git head-advanced: met after a real commit", (await ev.poll()) === true);
+  check("git head-advanced: stays met (monotonic)", (await ev.poll()) === true);
+
+  // message-match since arm time.
+  const mm = { type: "git", repoPath: gitDir, predicate: { kind: "message-match", regex: "ship it" }, met: false };
+  const ev2 = makeEvaluator(mm);
+  await ev2.arm({}, mm);
+  check("git message-match: not met before the commit", (await ev2.poll()) === false);
+  g("commit", "--allow-empty", "-q", "-m", "feat: ship it to prod");
+  check("git message-match: met on a matching subject", (await ev2.poll()) === true);
+
+  // Broken repoPath never flips (fail-open).
+  const bad = { type: "git", repoPath: "/nonexistent/repo/xyz", predicate: { kind: "head-advanced", ref: "HEAD" }, met: false };
+  const ev3 = makeEvaluator(bad);
+  await ev3.arm({}, bad);
+  check("git broken repoPath: never met (fail-open)", (await ev3.poll()) === false);
+}
+{
+  // command evaluator: OFF unless BRICK_ALLOW_COMMAND_CONDITIONS is set.
+  const cond = { type: "command", cmd: "true", met: false };
+  const ev = makeEvaluator(cond);
+  await ev.arm({}, cond);
+  delete process.env.BRICK_ALLOW_COMMAND_CONDITIONS;
+  check("command evaluator gated off by default", (await ev.poll()) === false);
+  process.env.BRICK_ALLOW_COMMAND_CONDITIONS = "1";
+  check("command evaluator: exit 0 met when enabled", (await ev.poll()) === true);
+  const fail = { type: "command", cmd: "exit 3", met: false };
+  const ev2 = makeEvaluator(fail);
+  await ev2.arm({}, fail);
+  check("command evaluator: wrong exit code not met", (await ev2.poll()) === false);
+  const expected = { type: "command", cmd: "exit 3", expectExit: 3, met: false };
+  const ev3 = makeEvaluator(expected);
+  await ev3.arm({}, expected);
+  check("command evaluator: expectExit matches non-zero", (await ev3.poll()) === true);
+  delete process.env.BRICK_ALLOW_COMMAND_CONDITIONS;
+}
+{
+  // ledger evaluator against the fake LEDGER_BIN: next-action change is the completion signal.
+  setLedgerProjects([{ id: "p1", name: "Proj One", nextAction: "step A" }]);
+  const cond = { type: "ledger", projectId: "p1", on: "next-action-change", met: false };
+  const ev = makeEvaluator(cond);
+  await ev.arm({}, cond);
+  check("ledger evaluator: baseline captured, not met", (await ev.poll()) === false);
+  setLedgerProjects([{ id: "p1", name: "Proj One", nextAction: "step B" }]);
+  check("ledger evaluator: met when nextAction changes", (await ev.poll()) === true);
+  setLedgerProjects([{ id: "p1", name: "Proj One", nextAction: "step A" }]);
+  check("ledger evaluator: stays met after a revert (monotonic)", (await ev.poll()) === true);
+}
+
 // ---------- integration: the running service ----------
 let dataDir;
 let srv;
@@ -169,6 +270,8 @@ try {
       BRICK_DATA_DIR: dataDir,
       ANTHROPIC_API_KEY: "",
       OPENROUTER_API_KEY: "",
+      BRICK_WATCH_INTERVAL_MS: "150", // fast watcher ticks so Epic-B checks settle in <1s
+      LEDGER_BIN: FAKE_LEDGER.bin,
     },
     stdio: "ignore",
   });
@@ -379,9 +482,85 @@ try {
   check("unbound launch fails with a clear error", !(await bad.json()).plan && bad.status >= 400);
   const del = await fetch(BASE + "/templates/" + tplSave.template.id, { method: "DELETE", headers: H });
   check("DELETE /templates/:id removes it", (await del.json()).ok === true && !(await get("/templates")).templates.some((t) => t.id === tplSave.template.id));
+
+  // ---------- Epic B: watchers + swap + advance mode + undo (live service, 150ms ticks) ----------
+  const settle = () => sleep(700); // several watcher ticks
+
+  // Settings round-trip first (B3/B4 surface).
+  const setB = await post("/config/settings", { advanceMode: "manual", undoWindowSec: 12 });
+  check("advance-mode settings persist", setB.settings.advanceMode === "manual" && setB.settings.undoWindowSec === 12);
+  check("GET /config reflects advance mode", (await get("/config")).settings.advanceMode === "manual");
+  await post("/config/settings", { advanceMode: "auto", undoWindowSec: 5 });
+
+  // AUTO: a git head-advanced condition auto-advances the queue with an undo window.
+  const gitCond = { type: "git", repoPath: gitDir, predicate: { kind: "head-advanced", ref: "HEAD" } };
+  const bp = await post("/plan/start", {
+    blocks: [
+      { task: "watched block", stopConditions: [gitCond] },
+      { task: "next block" },
+    ],
+  });
+  const watchedId = bp.plan.blocks[0].id;
+  await sleep(400); // let the watcher arm + tick at baseline
+  check("condition not met at baseline → no advance", (await get("/plan")).plan.activeBlockId === watchedId);
+  g("commit", "--allow-empty", "-q", "-m", "push!");
+  await settle();
+  let bplan = (await get("/plan")).plan;
+  check("auto: met condition advanced the queue", bplan.activeBlockId === bplan.blocks[1].id && bplan.blocks[0].status === "done");
+  check("auto: condition met flag persisted", bplan.blocks[0].stopConditions[0].met === true);
+  check("auto: undo offered with a deadline", bplan.undo?.fromBlockId === watchedId && typeof bplan.undo.availableUntil === "string");
+  const undone = await post("/plan/undo-advance", {});
+  check("undo returns to the watched block, marked ready", undone.plan.activeBlockId === watchedId && undone.plan.blocks[0].ready === true);
+  check("undo re-anchored the session", (await get("/session")).session?.focus.task === "watched block");
+  await settle();
+  check("undone block does NOT auto-re-advance (no fire loop)", (await get("/plan")).plan.activeBlockId === watchedId);
+  await post("/plan/end", {});
+
+  // MANUAL: the queue waits for the tap; the block lights up ready.
+  await post("/config/settings", { advanceMode: "manual" });
+  const mp = await post("/plan/start", {
+    blocks: [{ task: "manual watched", stopConditions: [gitCond] }, { task: "manual next" }],
+  });
+  const manualId = mp.plan.blocks[0].id;
+  await sleep(300);
+  g("commit", "--allow-empty", "-q", "-m", "another push");
+  await settle();
+  bplan = (await get("/plan")).plan;
+  check("manual: block marked ready, queue did NOT move", bplan.activeBlockId === manualId && bplan.blocks[0].ready === true);
+  const tapped = await post("/plan/block/advance", {});
+  check("manual: the tap advances", tapped.plan.activeBlockId === tapped.plan.blocks[1].id);
+  await post("/plan/end", {});
+  await post("/config/settings", { advanceMode: "auto" });
+
+  // TIME: budget expiry nudges (ready) but never silently flips the queue (§12).
+  const tp = await post("/plan/start", {
+    blocks: [{ task: "timed block", budgetMinutes: 0.003, swapMode: "time" }, { task: "after time" }],
+  });
+  const timedId = tp.plan.blocks[0].id;
+  await settle();
+  bplan = (await get("/plan")).plan;
+  check("time: budget expiry → ready (nudge), no silent flip", bplan.activeBlockId === timedId && bplan.blocks[0].ready === true);
+  await post("/plan/end", {});
+
+  // LEDGER: advancing the project in (fake) Ledger completes the block — the keystone signal.
+  setLedgerProjects([{ id: "p1", name: "Proj One", nextAction: "phase one" }]);
+  await post("/plan/start", {
+    blocks: [
+      { task: "ledger watched", stopConditions: [{ type: "ledger", projectId: "p1" }] },
+      { task: "ledger next" },
+    ],
+  });
+  await sleep(400);
+  setLedgerProjects([{ id: "p1", name: "Proj One", nextAction: "phase two" }]);
+  await settle();
+  bplan = (await get("/plan")).plan;
+  check("ledger: next-action change auto-advanced the block", bplan.activeBlockId === bplan.blocks[1].id && bplan.blocks[0].stopConditions[0].met === true);
+  await post("/plan/end", {});
 } finally {
   if (srv) srv.kill();
   if (dataDir) await rm(dataDir, { recursive: true, force: true }).catch(() => {});
+  await rm(gitDir, { recursive: true, force: true }).catch(() => {});
+  await rm(FAKE_LEDGER.dir, { recursive: true, force: true }).catch(() => {});
 }
 
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");

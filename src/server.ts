@@ -29,13 +29,40 @@ import {
   restorePlan,
   startPlan,
   toggleStep,
+  undoAdvance,
 } from "./plan-runtime.js";
 import type { StartBlockInput } from "./plan-runtime.js";
 import { LocalTemplateStore, expandTemplate, liftPlanToTemplate } from "./template-store.js";
 import type { SlotBinding } from "./template-store.js";
 import { getPlan } from "./plan-runtime.js";
 import type { ChatTurn } from "./providers/index.js";
-import type { FocusRef, WorkflowTemplate } from "./types.js";
+import type { FocusRef, GitPredicate, StopCondition, WorkflowTemplate } from "./types.js";
+
+/** Light validation of user-posted stop conditions (Epic B): keep only recognizable shapes; the
+ *  runtime forces `met:false` and the evaluators fail open on anything broken at runtime. */
+function parseStopConditions(v: unknown): StopCondition[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: StopCondition[] = [];
+  for (const raw of v.slice(0, 8)) {
+    if (!raw || typeof raw !== "object") continue;
+    const c = raw as Record<string, unknown>;
+    if (c.type === "git" && typeof c.repoPath === "string" && c.predicate && typeof c.predicate === "object") {
+      const p = c.predicate as Record<string, unknown>;
+      let predicate: GitPredicate | null = null;
+      if (p.kind === "head-advanced") predicate = { kind: "head-advanced", ref: typeof p.ref === "string" ? p.ref : undefined };
+      else if (p.kind === "merge-commit" && typeof p.intoRef === "string") predicate = { kind: "merge-commit", intoRef: p.intoRef };
+      else if (p.kind === "message-match" && typeof p.regex === "string") predicate = { kind: "message-match", regex: p.regex };
+      if (predicate) out.push({ type: "git", repoPath: c.repoPath, predicate, met: false });
+    } else if (c.type === "ledger" && typeof c.projectId === "string") {
+      out.push({ type: "ledger", projectId: c.projectId, on: "next-action-change", from: typeof c.from === "string" ? c.from : undefined, met: false });
+    } else if (c.type === "command" && typeof c.cmd === "string") {
+      out.push({ type: "command", cmd: c.cmd, cwd: typeof c.cwd === "string" ? c.cwd : undefined, expectExit: typeof c.expectExit === "number" ? c.expectExit : undefined, met: false });
+    } else if (c.type === "manual") {
+      out.push({ type: "manual", met: false });
+    }
+  }
+  return out.length ? out : undefined;
+}
 import {
   endSession,
   getSession,
@@ -259,6 +286,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       if (Array.isArray(body.pageScopeDomains)) patch.pageScopeDomains = body.pageScopeDomains as string[];
       if (Array.isArray(body.rabbitHoleDomains)) patch.rabbitHoleDomains = body.rabbitHoleDomains as string[];
       if (typeof body.rabbitHoleMinutes === "number") patch.rabbitHoleMinutes = body.rabbitHoleMinutes;
+      if (body.advanceMode === "auto" || body.advanceMode === "manual") patch.advanceMode = body.advanceMode;
+      if (typeof body.undoWindowSec === "number") patch.undoWindowSec = body.undoWindowSec;
       settings = await saveSettings(patch);
       return sendJson(res, 200, { settings, model: effectiveModel() });
     }
@@ -423,6 +452,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           focus,
           budgetMinutes: typeof b.budgetMinutes === "number" ? b.budgetMinutes : undefined,
           steps: Array.isArray(b.steps) ? (b.steps as unknown[]).map(String).slice(0, 20) : undefined,
+          stopConditions: parseStopConditions(b.stopConditions),
+          advanceMode: b.advanceMode === "auto" || b.advanceMode === "manual" ? b.advanceMode : undefined,
           repeat:
             b.repeat && typeof b.repeat === "object"
               ? {
@@ -496,6 +527,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
     case "POST /plan/end":
       return sendJson(res, 200, { plan: await endPlan() });
+
+    case "POST /plan/undo-advance":
+      // Revert the last auto-advance within its undo window (Epic B3).
+      return sendJson(res, 200, { plan: await undoAdvance() });
 
     case "GET /templates":
       return sendJson(res, 200, { templates: await templates.list() });
