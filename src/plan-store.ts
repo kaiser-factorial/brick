@@ -68,6 +68,9 @@ export function advancePlan(
         startedAt: undefined,
         completedAt: undefined,
         actualMinutes: undefined,
+        ready: undefined,
+        conditionFiredAt: undefined, // a fresh copy gets fresh triggers (review fix)
+        timeFiredAt: undefined,
         steps: block.steps?.map((s) => ({ ...s, done: false })),
         stopConditions: block.stopConditions?.map((c) => ({ ...c, met: false, metAt: undefined })),
       });

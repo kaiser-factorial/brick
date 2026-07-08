@@ -74,6 +74,9 @@ export interface ExpandedBlock {
   steps?: string[];
   repeat?: TemplateBlock["repeat"];
   swapMode?: TemplateBlock["swapMode"];
+  stopConditions?: TemplateBlock["stopConditions"]; // review fix: carried through expansion
+  advanceMode?: TemplateBlock["advanceMode"];
+  completionPolicy?: TemplateBlock["completionPolicy"];
 }
 
 const EXPANSION_CAP = 48; // hard ceiling on generated blocks (runaway guard)
@@ -101,8 +104,18 @@ export function expandTemplate(
     steps: b.steps ? [...b.steps] : undefined,
     repeat: b.repeat,
     swapMode: b.swapMode,
+    // Each expansion gets its own fresh (unmet) copy — a stop condition is per-block-instance.
+    stopConditions: b.stopConditions?.map((c) => ({ ...c, met: false, metAt: undefined })),
+    advanceMode: b.advanceMode,
+    completionPolicy: b.completionPolicy,
   }));
   if (!one.length) throw new Error("template has no blocks");
+
+  // Deep-clone per repetition — review fix: `{...b}` alone shares the stopConditions ARRAY
+  // reference across every repeated instance, so marking one instance's condition met would leak
+  // into every other copy of that block in the expanded plan.
+  const cloneOne = (): ExpandedBlock[] =>
+    one.map((b) => ({ ...b, stopConditions: b.stopConditions?.map((c) => ({ ...c })) }));
 
   const repeat = tpl.pattern?.repeat ?? 1;
   if (repeat === "until-end-of-day") {
@@ -115,13 +128,13 @@ export function expandTemplate(
     const remaining = (midnight.getTime() - now.getTime()) / 60000;
     const reps = Math.max(1, Math.floor(remaining / patternMinutes));
     const out: ExpandedBlock[] = [];
-    for (let i = 0; i < reps && out.length < EXPANSION_CAP; i += 1) out.push(...one.map((b) => ({ ...b })));
+    for (let i = 0; i < reps && out.length < EXPANSION_CAP; i += 1) out.push(...cloneOne());
     return out.slice(0, EXPANSION_CAP);
   }
 
   const reps = Math.max(1, Math.min(Math.round(repeat), Math.floor(EXPANSION_CAP / one.length) || 1));
   const out: ExpandedBlock[] = [];
-  for (let i = 0; i < reps; i += 1) out.push(...one.map((b) => ({ ...b })));
+  for (let i = 0; i < reps; i += 1) out.push(...cloneOne());
   return out.slice(0, EXPANSION_CAP);
 }
 
@@ -159,6 +172,11 @@ export function liftPlanToTemplate(
       steps: b.steps?.map((s) => s.label),
       repeat: b.repeat,
       swapMode: b.swapMode,
+      // Review fix: carry stop conditions/advance mode/policy through save-as-template — they
+      // were silently dropped before, so a relaunched template lost all its watchers.
+      stopConditions: b.stopConditions?.map((c) => ({ ...c, met: false, metAt: undefined })),
+      advanceMode: b.advanceMode,
+      completionPolicy: b.completionPolicy,
     }));
 
   return {

@@ -43,6 +43,9 @@ export interface AdjudicationResult extends Verdict {
   latencyMs: number;
   /** True if a low-confidence block was downgraded to allow (conservative-allow). */
   downgraded: boolean;
+  /** True when the allow is a FAIL-OPEN from a provider/network error, not a model verdict —
+   *  callers must not treat it as a judged allow (review fix: outage observability). */
+  providerError?: boolean;
 }
 
 // ---------- Workload / day-plan layer (Epic A) ----------
@@ -98,6 +101,12 @@ export interface WorkBlock {
   /** Set when a swap trigger fired but the queue is waiting for your tap (manual mode, or a
    *  time-driven nudge, or after an undo). The popup's "advance now" lights up on it. */
   ready?: boolean;
+  /** PERSISTED per-trigger dedup (review fix): the condition trigger fired (auto-advanced, went
+   *  manual-ready, or was held by an undo) — it won't fire again for this block instance. */
+  conditionFiredAt?: string;
+  /** PERSISTED: the time (budget) trigger fired its nudge. Independent of the condition trigger,
+   *  so a budget expiry never disarms a later "done when I push". */
+  timeFiredAt?: string;
   status: BlockStatus;
   startedAt?: string;
   completedAt?: string;
@@ -110,6 +119,8 @@ export interface WorkloadPlan {
   blocks: WorkBlock[]; // ORDERED; the queue
   activeBlockId?: string;
   createdAt: string;
+  /** Pomodoro settings for the plan's sessions — persisted so a restart re-anchors correctly. */
+  pomodoro?: { workMinutes?: number; breakMinutes?: number };
 }
 
 // ---------- Workflow templates (Epic T) ----------
@@ -132,6 +143,9 @@ export interface TemplateBlock {
   steps?: string[];
   repeat?: RepeatSpec;
   swapMode?: SwapMode;
+  stopConditions?: StopCondition[]; // carried through save/relaunch; met flags reset per expansion
+  advanceMode?: "auto" | "manual";
+  completionPolicy?: "any" | "all";
   onActivate?: { bunch?: string }; // integration seam with Bunch — stored, not yet acted on
 }
 

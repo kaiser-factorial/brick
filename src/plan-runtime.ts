@@ -90,6 +90,25 @@ export interface StartBlockInput {
   swapMode?: WorkBlock["swapMode"];
   stopConditions?: WorkBlock["stopConditions"]; // Epic B — met flags are forced false at start
   advanceMode?: WorkBlock["advanceMode"]; // per-block override (§8.1)
+  completionPolicy?: WorkBlock["completionPolicy"]; // any|all over multiple conditions
+}
+
+/** ONE block constructor for every creation path (startPlan, insert, from-template) — review fix:
+ *  the insert path had drifted and silently dropped stopConditions/advanceMode. */
+function mintBlock(input: StartBlockInput, id: string, status: WorkBlock["status"]): WorkBlock {
+  return {
+    id,
+    focus: input.focus,
+    budgetMinutes: input.budgetMinutes,
+    steps: (input.steps ?? []).map((label, j) => ({ id: `step_${j}`, label, done: false })),
+    repeat: input.repeat,
+    swapMode: input.swapMode,
+    stopConditions: input.stopConditions?.map((c) => ({ ...c, met: false, metAt: undefined })),
+    advanceMode: input.advanceMode,
+    completionPolicy: input.completionPolicy,
+    status,
+    startedAt: status === "active" ? new Date().toISOString() : undefined,
+  };
 }
 
 let store: PlanStore = new LocalPlanStore();
@@ -102,7 +121,9 @@ const WATCH_INTERVAL_MS = Math.max(100, Number(process.env.BRICK_WATCH_INTERVAL_
 let evaluators: Array<{ index: number; ev: Evaluator }> = []; // for the active block's conditions
 let watchTimer: NodeJS.Timeout | null = null;
 let tickInFlight = false;
-const firedBlocks = new Set<string>(); // swap decision fired once per block instance (dedup)
+// Swap-fire dedup is PERSISTED on the block (conditionFiredAt / timeFiredAt) — review fix: the old
+// in-memory Set both disarmed the condition trigger after a mere time-nudge and evaporated on
+// restart, letting an undone block auto-re-advance.
 let undoState: { snapshot: WorkloadPlan; fromBlockId: string; deadline: number } | null = null;
 
 async function armWatchers(block: WorkBlock): Promise<void> {
@@ -171,24 +192,32 @@ async function watchTick(): Promise<void> {
       await persist();
     }
 
-    // Swap decision (B2) + how it lands (B3).
-    if (firedBlocks.has(block.id)) return;
+    // Swap decision (B2) + how it lands (B3). Dedup is PER TRIGGER and persisted: a time nudge
+    // must never disarm a later condition fire, and a fired/held trigger survives restarts.
     const conditionMet = conditionsSatisfied(block);
     const elapsed = block.startedAt
       ? (Date.now() - new Date(block.startedAt).getTime()) / 60000
       : 0;
     const timeUp = block.budgetMinutes != null && elapsed >= block.budgetMinutes;
     const mode = deriveSwapMode(block);
-    if (!decideSwap(mode, conditionMet, timeUp)) return;
 
-    firedBlocks.add(block.id);
-    const conditionDriven = conditionMet && mode !== "time";
-    if (conditionDriven) {
+    // Condition trigger — live in condition/first/both modes, once per block instance.
+    const conditionFires =
+      !block.conditionFiredAt &&
+      mode !== "time" &&
+      decideSwap(mode, conditionMet, timeUp) &&
+      conditionMet &&
+      (mode !== "both" || timeUp);
+    if (conditionFires) {
+      block.conditionFiredAt = new Date().toISOString();
       const settings = await loadSettings();
       const effective = block.advanceMode ?? settings.advanceMode ?? "auto";
       if (effective === "auto") {
-        // Auto-advance with an undo window: snapshot first, then move the queue.
+        // Auto-advance with an undo window. The snapshot is taken AFTER stamping the fire flag,
+        // so an undo restores a block whose condition trigger is already consumed — the hold now
+        // survives restarts (the flag is persisted with the plan).
         const windowSec = settings.undoWindowSec ?? 30;
+        await persist();
         const snapshot = JSON.parse(JSON.stringify(current)) as WorkloadPlan;
         const fromBlockId = block.id;
         await advanceBlock(block.id, "done");
@@ -202,18 +231,24 @@ async function watchTick(): Promise<void> {
       await persist();
       return;
     }
-    // Time-driven (§12): the clock running out is expected — nudge, never silently flip.
-    // Epic C layers the escalating notification sequence on this flag.
-    block.ready = true;
-    bump();
-    await persist();
+
+    // Time trigger (§12): the clock running out is expected — nudge, never silently flip.
+    // Independent of the condition trigger; Epic C layers the escalation sequence on the flag.
+    if (timeUp && !block.timeFiredAt && (mode === "time" || mode === "first")) {
+      block.timeFiredAt = new Date().toISOString();
+      block.ready = true;
+      bump();
+      await persist();
+    }
   } finally {
     tickInFlight = false;
   }
 }
 
 /** Revert the last auto-advance within its undo window (Epic B3). The restored block is marked
- *  `ready` and won't auto-fire again — you said "not done", so the queue waits for your tap. */
+ *  `ready` and won't auto-fire again — you said "not done", so the queue waits for your tap. The
+ *  hold is PERSISTED: the snapshot was taken after `conditionFiredAt` was stamped, so it survives
+ *  service restarts (review fix). */
 export async function undoAdvance(): Promise<PlanView | null> {
   if (!undoState || Date.now() > undoState.deadline) {
     undoState = null;
@@ -224,8 +259,7 @@ export async function undoAdvance(): Promise<PlanView | null> {
   current = snapshot;
   const block = current.blocks.find((b) => b.id === fromBlockId);
   if (block) {
-    block.ready = true; // suppress an immediate re-fire; advance stays one tap away
-    firedBlocks.add(block.id);
+    block.ready = true; // advance stays one tap away; conditionFiredAt already set in the snapshot
   }
   bump();
   await persist();
@@ -309,14 +343,20 @@ export function getStateVersion(): number {
   return stateVersion;
 }
 
-/** Re-hydrate a persisted plan on service start (best-effort; the queue survives restarts). */
+/** Re-hydrate a persisted plan on service start (best-effort; the queue survives restarts). Also
+ *  re-anchors the FocusSession (review fix: without it, adjudication 500s after a restart and a
+ *  per-call task could steer the focus) and restores the plan's pomodoro settings. */
 export async function restorePlan(): Promise<void> {
   const saved = await store.load();
   if (saved?.activeBlockId) {
     current = saved;
+    pomodoro = { ...saved.pomodoro };
     bump();
     const block = activeBlock();
-    if (block) await armWatchers(block); // fresh baselines — a restart re-anchors the watchers
+    if (block) {
+      await anchorSession(block); // the session is in-memory only — a restart must re-anchor it
+      await armWatchers(block); // fresh baselines
+    }
   }
 }
 
@@ -329,26 +369,17 @@ export async function startPlan(opts: {
   if (!opts.blocks.length) throw new Error("a plan needs at least one block");
   pomodoro = { workMinutes: opts.workMinutes, breakMinutes: opts.breakMinutes };
   const now = new Date().toISOString();
-  const blocks: WorkBlock[] = opts.blocks.map((b, i) => ({
-    id: `blk_${i}_${randomUUID().slice(0, 8)}`,
-    focus: b.focus,
-    budgetMinutes: b.budgetMinutes,
-    steps: (b.steps ?? []).map((label, j) => ({ id: `step_${j}`, label, done: false })),
-    repeat: b.repeat,
-    swapMode: b.swapMode,
-    stopConditions: b.stopConditions?.map((c) => ({ ...c, met: false, metAt: undefined })),
-    advanceMode: b.advanceMode,
-    status: i === 0 ? "active" : "pending",
-    startedAt: i === 0 ? now : undefined,
-  }));
+  const blocks: WorkBlock[] = opts.blocks.map((b, i) =>
+    mintBlock(b, `blk_${i}_${randomUUID().slice(0, 8)}`, i === 0 ? "active" : "pending"),
+  );
   current = {
     id: `plan_${Date.now().toString(36)}`,
     label: opts.label,
     blocks,
     activeBlockId: blocks[0].id,
     createdAt: now,
+    pomodoro, // persisted so a restart re-anchors with the right work/break minutes
   };
-  firedBlocks.clear();
   undoState = null;
   bump();
   await persist();
@@ -364,6 +395,11 @@ export async function advanceBlock(
   if (!current) throw new Error("no active plan");
   const id = blockId ?? current.activeBlockId;
   if (!id) throw new Error("no active block");
+  // Review fix: only the ACTIVE block may be advanced — advancing a pending block would strand
+  // the active one in status "active" forever (two actives, broken accounting).
+  if (id !== current.activeBlockId) {
+    throw new Error(`block ${id} is not the active block — only the active block can be advanced`);
+  }
   undoState = null; // a fresh advance supersedes any pending undo (the auto path re-arms it after)
   current = advancePlan(current, id, how);
   bump();
@@ -427,19 +463,17 @@ export async function editPlan(edit: {
     current.blocks = current.blocks.filter((x) => x.id !== edit.drop);
   }
   if (edit.budget) {
+    // Review fix: reject non-finite/absent minutes instead of coercing to a surprise 1-minute
+    // budget (or NaN, which read as instant "grace" escalation).
+    if (!Number.isFinite(edit.budget.budgetMinutes) || edit.budget.budgetMinutes <= 0) {
+      throw new Error("budget edit needs a positive budgetMinutes number");
+    }
     const b = current.blocks.find((x) => x.id === edit.budget!.blockId);
     if (b) b.budgetMinutes = Math.max(1, Math.round(edit.budget.budgetMinutes));
   }
   if (edit.insert) {
-    current.blocks.push({
-      id: `blk_i_${randomUUID().slice(0, 8)}`,
-      focus: edit.insert.focus,
-      budgetMinutes: edit.insert.budgetMinutes,
-      steps: (edit.insert.steps ?? []).map((label, j) => ({ id: `step_${j}`, label, done: false })),
-      repeat: edit.insert.repeat,
-      swapMode: edit.insert.swapMode,
-      status: "pending",
-    });
+    // Shared constructor (review fix) — the old inline copy dropped stopConditions/advanceMode.
+    current.blocks.push(mintBlock(edit.insert, `blk_i_${randomUUID().slice(0, 8)}`, "pending"));
   }
   if (edit.order?.length) {
     // Reorder only the pending tail; settled blocks (done/skipped/active) keep their position.
@@ -460,7 +494,6 @@ export async function endPlan(): Promise<PlanView | null> {
   if (!current) return null;
   stopLoop();
   undoState = null;
-  firedBlocks.clear();
   const now = new Date().toISOString();
   for (const b of current.blocks) {
     if (b.status === "pending") b.status = "skipped";
