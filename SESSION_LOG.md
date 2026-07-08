@@ -266,6 +266,33 @@ early wave (Epics R, 0, U). All on branch `worktree-workload-early-wave` (draft 
 - **Remaining Phase-R:** none blocking — R4 (multi-model eval table) is optional. Provider/model epic
   is functionally complete.
 
+### BRICK-0.3 / 0.5 — clarify overlay + honesty lever (DONE, 2026-07-08)
+- **Overlay card extended** (`overlay.js`): `corner` (non-blocking bottom-right toast, no backdrop),
+  `checkbox`, `links`, a green `yes` button kind, and button/link `onClick(ctx)` receives the
+  checkbox state — all additive to the U1 primitive.
+- **0.3 clarify flow** (`content-guard.js`): an `ask` verdict (from phase-1 or the deeper title
+  check, and from grace `recheck`) shows the corner card — **Yes, on-topic** / **No, block** /
+  **remember for this focus** checkbox / **make focus more specific** link. "remember" → `POST
+  /decisions/learn` (`via:"clarify"`); unchecked applies once. Ignored → fail open (page stays; a
+  per-load `clarifiedHref` guard prevents re-nagging). "No" soft-blocks via `goBack`. The specificity
+  link `prompt()`s and calls new **`POST /session/refocus`** (`session.ts` `refocusSession`), then
+  re-evaluates.
+- **0.5 honesty lever**: popup active view gains **⚑ off-task** / **✓ on-topic** for the current tab
+  → `markPage` in `background.js` learns `via:"correction"` and soft-blocks (off-task, `brick:catch`)
+  or returns a blocked tab to the page (on-topic); resolves the real URL behind `block.html`. Options
+  page gains a **gatekeeper readout** (`total · allow/block · clarify/correction`) + **clear learned
+  decisions** button. `background.js` routes: `learn`, `refocus`, `markPage`, `clearDecisions`.
+- **Verified:** typecheck + `node --check` (all 7 extension JS) clean; `npm run smoke` = **33/33**
+  (added refocus + clarify/correction count checks). **Live route run** (active session): clarify
+  yes+remember → learned allow short-circuits `via:learned`; correction → learned block; refocus
+  changes the focusKey so the old learned allow stops applying (page returns to the model); readout
+  counts + clear all correct.
+- 🖐 **Browser-only left:** eyeball the clarify corner card, the popup off-task/on-topic buttons, and
+  the options readout in Chrome (preview harness updated with the clarify card).
+
+**Epic 0 is now functionally complete** except the optional tail: 0.6 (corrections→eval cases),
+0.7 (YouTube per-page scoping), 0.8 (rabbit-hole time nudge).
+
 ### Next up
-- 0.3/0.5/0.7/0.8 (need Epic U + browser), Epics H/S/F, then A→(T,B)→C→D.
+- Optional Epic-0 tail (0.6/0.7/0.8), then Epics H/S/F, then A→(T,B)→C→D.
 
