@@ -75,6 +75,18 @@
       session picks up the changes.
     </p>
 
+    <h2>Ask about BRICK</h2>
+    <div id="helpLog" style="display:none;max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:3px;padding:10px;margin-bottom:8px"></div>
+    <div class="row">
+      <input type="text" id="helpQ" spellcheck="false" placeholder="e.g. How do I add a Tier-1 site? What does the remember checkbox do?" />
+      <button id="helpAsk" style="margin-top:0;width:auto;white-space:nowrap">ask</button>
+    </div>
+    <p class="muted">
+      A grounded assistant that answers from BRICK's own documentation (and can read current
+      config/session state). It won't invent settings — if something isn't in the docs it says so.
+      Uses your configured provider and model.
+    </p>
+
     <h2>Session feedback</h2>
     <div class="row" style="gap:18px;flex-wrap:wrap">
       <label class="muted" style="display:flex;align-items:center;gap:6px">

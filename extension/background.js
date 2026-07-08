@@ -534,6 +534,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "graceEnd": // Epic F1 — resume: extend phaseEndsAt by the paused duration
           sendResponse(await graceEnd());
           break;
+        case "help": // "Ask about BRICK" panel (Epic H3) → grounded /help Q&A
+          sendResponse(
+            await api("/help", {
+              method: "POST",
+              body: JSON.stringify({ question: msg.question, history: msg.history || [] }),
+            }),
+          );
+          break;
         case "startSession":
           sendResponse(await startSession(msg.opts ?? {}));
           break;

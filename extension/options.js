@@ -88,6 +88,56 @@ $("clearModel").addEventListener("click", () => {
   });
 });
 
+// "Ask about BRICK" (Epic H3) — grounded usage Q&A over the service's /help route.
+const helpHistory = []; // short in-page history: [{role, content}]
+
+function helpAppend(role, text, sources) {
+  const log = $("helpLog");
+  log.style.display = "block";
+  const div = document.createElement("div");
+  div.style.margin = "0 0 10px";
+  const who = document.createElement("div");
+  who.className = "muted";
+  who.textContent = role === "user" ? "you" : "brick";
+  const body = document.createElement("div");
+  body.style.whiteSpace = "pre-wrap";
+  if (role === "assistant") body.style.color = "#d9e8dd";
+  body.textContent = text;
+  div.appendChild(who);
+  div.appendChild(body);
+  if (sources && sources.length) {
+    const src = document.createElement("div");
+    src.className = "muted";
+    src.textContent = "sources: " + sources.join(" · ");
+    div.appendChild(src);
+  }
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function askHelp() {
+  const q = $("helpQ").value.trim();
+  if (!q) return;
+  $("helpQ").value = "";
+  helpAppend("user", q);
+  helpAppend("assistant", "…thinking");
+  const placeholder = $("helpLog").lastChild;
+  chrome.runtime.sendMessage({ type: "help", question: q, history: helpHistory.slice(-6) }, (res) => {
+    placeholder.remove();
+    if (!res || res.error) {
+      helpAppend("assistant", "help unavailable: " + ((res && res.error) || "service unreachable"));
+      return;
+    }
+    helpAppend("assistant", res.answer, res.sources);
+    helpHistory.push({ role: "user", content: q }, { role: "assistant", content: res.answer });
+  });
+}
+
+$("helpAsk").addEventListener("click", askHelp);
+$("helpQ").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") askHelp();
+});
+
 // Session feedback (Epics S3 + F) — purely client-side; persisted to chrome.storage.local.
 const FEEDBACK_DEFAULTS = { sound: false, border: true, borderSec: 10, maxGraceMin: 5 };
 

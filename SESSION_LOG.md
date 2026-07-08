@@ -362,6 +362,34 @@ early wave (Epics R, 0, U). All on branch `worktree-workload-early-wave` (draft 
   during grace); 3× "one more minute" in one block → progressively deeper tint, next block light;
   cap (set to 1 min) → hard block; chip tap returns at every level.
 
+### Epic H — in-app help agent (H1–H4 DONE, 2026-07-08). **The early wave is complete.**
+- **H1 corpus** (`help/*.md`, 6 docs / 30+ chunks by `##` section): getting-started, blocking-and-
+  tiers, gatekeeper (ask/clarify/learned/precedence/honesty/per-page/rabbit-hole), sessions-and-
+  feedback (pomodoro/border/sound/grace/cap), model-and-provider, service-and-troubleshooting.
+  **Deliberately covers only what exists** (per the no-invented-config AC) — plan/template docs get
+  added when Epics A/T land.
+- **H2 `/help` route** (`src/help.ts` + `server.ts`): corpus loader + light keyword retrieval
+  (heading-boosted term overlap, top-4) → grounded chat call on the **provider seam's new `chat()`
+  method** (both providers; no forced tool). System prompt: answer ONLY from excerpts; unknown →
+  honest don't-know + doc pointer. Returns `{answer, sources, model}`; short sanitized history
+  supported. Key-free → clean 503.
+- **H4 situated tools** (shipped with v1): `get_config` / `get_session` / `get_learned_decisions` —
+  read-only, `tool_choice` auto, executed by an internal ≤4-round loop inside each provider.
+- **H3 panel**: options page **"Ask about BRICK"** chat box (log + sources line + short history)
+  via a background `help` route.
+- **Smoke hermeticity fix:** the earlier `.env` copy meant spawned smoke servers inherited real
+  keys (tier-2 checks were silently hitting the model). Smoke now blanks both keys → genuinely
+  key-free again. **Smoke 46/46** (adds corpus-load + 7 question→doc retrieval mappings + key-free
+  /help 503).
+- **Verified live** (OpenRouter): 3 how-to questions → correct, sourced answers (right doc §
+  sections); out-of-scope "sync to Google Calendar" → honest not-in-the-docs + local-log pointer;
+  **H4**: "what am I focused on?" answered with the exact live focus task + phase, "which sites are
+  blocked / what's learned?" answered from live tiers + learned store — and session/decisions state
+  confirmed unmutated afterwards.
+- 🖐 Browser: ask a few questions in the options panel (needs the service running).
+- H5 (shared corpus into Ledger's focus agent) = Ledger-repo work, deferred with Epic D.
+
 ### Next up
-- Epic H (help agent) — last of the early wave — then A→(T,B)→C→D.
+- **Early wave done: U ✓ R ✓ 0 ✓ S ✓ F ✓ H ✓.** Next: the plan layer — Epic A (plan queue), then
+  (T, B) → C → D per `WORKLOAD_TICKETS.md`.
 
