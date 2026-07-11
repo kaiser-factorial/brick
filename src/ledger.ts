@@ -15,6 +15,53 @@ function ledgerBin(): string {
   return process.env.LEDGER_BIN ?? "";
 }
 
+/** Carries the ledger CLI's exit code (`internal/exit/exit.go`) so callers can distinguish e.g.
+ *  NotFound (20) from other failures, without parsing stderr text. */
+export class LedgerCliError extends Error {
+  constructor(
+    message: string,
+    public readonly code: number,
+  ) {
+    super(message);
+    this.name = "LedgerCliError";
+  }
+}
+
+/**
+ * Shell out to the ledger CLI (Epic D — the plan/template store). Optionally pipes `stdin` (the
+ * `plan set` / `template set` commands read their JSON body from stdin, not an arg, to avoid
+ * shell-quoting/arg-length limits on a potentially large payload).
+ * Throws `LedgerCliError` on a non-zero exit (code from the child process, per exit.go), or a
+ * plain Error if LEDGER_BIN is unset or the binary itself can't be spawned.
+ */
+export async function runLedger(args: string[], opts?: { stdin?: string }): Promise<string> {
+  const bin = ledgerBin();
+  if (!bin) throw new Error("LEDGER_BIN is not set");
+  const run = execFileAsync(bin, args, { maxBuffer: 10 * 1024 * 1024 });
+  if (opts?.stdin != null) {
+    run.child.stdin?.end(opts.stdin);
+  } else {
+    run.child.stdin?.end();
+  }
+  try {
+    const { stdout } = await run;
+    return stdout;
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
+    if (typeof e.code === "number") {
+      // Review fix: cobra prints "Error: <msg>" + a full usage block to stderr on any RunE
+      // error, and the CLI's own exit.Exit() then reprints the bare message as the LAST line
+      // (see internal/exit/exit.go) — every command in this CLI follows that shape. Take that
+      // last non-blank line rather than the whole blob, so a thrown LedgerCliError reads as
+      // "Template not found: x", not a multi-line flags/usage dump.
+      const lines = e.stderr?.trim().split("\n").filter(Boolean);
+      const message = (lines?.length ? lines[lines.length - 1] : undefined) ?? e.message;
+      throw new LedgerCliError(message, e.code);
+    }
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+}
+
 /** Subset of the `ledger status --json` project shape we use. */
 interface LedgerProject {
   id: string;

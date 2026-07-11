@@ -5,22 +5,19 @@
 
 ---
 
-## ▶ Next up — Epic D (Ledger-native store) — the last epic
+## ▶ All five epics done — Epic D (Ledger-native store) shipped 2026-07-11
 
-**Where we are (2026-07-08):** the early wave (U/R/0/S/F/H) is **merged to master** (PR #1), and the
-**complete local-first plan layer — Epics A, T, B, C — is on PR #2** (`workload-plan-layer`,
-smoke 108/108). 🖐 Browser gates are pending on PR #2 (checklists in the PR comments).
+**Where we are:** the early wave (U/R/0/S/F/H) is merged (PR #1) and the local-first plan layer
+(A/T/B/C) is complete. **Epic D** — the last epic, the only one touching the mature Ledger app —
+is now done too: `LedgerPlanStore`/`LedgerTemplateStore` (Firestore, via new `ledger plan`/
+`ledger template` CLI verbs in `ledger-cli`) are drop-in swaps for the local JSON stores behind the
+existing `PlanStore`/`TemplateStore` seams, selected by `BULWORK_PLAN_BACKEND=ledger`. Verified live
+against real Firestore (start/step/restart/migrate — see `SESSION_LOG.md`'s "Epic D" entry for full
+detail and the one documented divergence from the ticket text). **Not built:** H5 (shared `help/`
+corpus into Ledger's own focus agent) and a `ledger-mcp` wrapper for the two new commands — both
+flagged as natural follow-ups, not required by D1/D2's acceptance criteria.
 
-**Epic D setup (start the next session with this):** the Ledger repos live at
-`~/Projects/ledger_root/{ledger,ledger-cli,ledger-mcp}` — NOT the `../ledger` sibling paths written
-below. Launch the session from a directory spanning bulwork + ledger_root (or `--add-dir`), set
-`LEDGER_BIN` to the built CLI, and have Firestore creds ready. D1 adds `ledger plan
-show/advance/step --json` verbs in the Ledger repo; D2 drops `LedgerPlanStore`/`LedgerTemplateStore`
-behind the existing `PlanStore`/`TemplateStore` seams (`usePlanStore()` is the hook) + a one-shot
-`.data` migration; then re-run the Phase A/T gates against the Ledger backend. H5 (shared help
-corpus into Ledger's focus agent) rides along.
-
-The two docs that drive everything:
+The two docs that drove the build (kept as reference — the phased history below is now complete):
 
 - **`WORKLOAD_DESIGN.md`** — full system design. Workload/day-plan queue, swap policy, templates,
   advance-mode setting, notifications, Ledger-native store (§1–13); **gatekeeper quality** (§14),
@@ -31,52 +28,10 @@ The two docs that drive everything:
   each with acceptance criteria and a **per-phase verification gate** (checkboxes to run before
   sign-off).
 
-**Build order:** `U → (R → {0, H}, S, F) → A → (T, B) → C → D`. Begin with **BULWORK-U1** (tiny
-shared-overlay prelude); the early wave (Epics R/0/H/S/F) makes the tool better *today*, before any
-plan architecture. **Epic R** (OpenRouter provider + options-page model picker) comes first in the
-service lane because it and Epic 0 both edit `adjudicate.ts`; **Epic H** (in-app help agent — ask bulwork
-how to use itself) also builds on R's provider. Epic D is the only one that touches the mature Ledger
-app — last.
-
-### Parallelization map (optimize the Code session around this)
-
-The big win: **Epic 0's service side and all extension work never share a file**, so they run as two
-concurrent lanes.
-
-```
-WAVE 0 (prelude, tiny — unblocks every extension overlay)
-  └─ BULWORK-U1  transient-treatment helper           [extension/content-guard.js (+overlay.js)]
-
-WAVE 1 — two lanes in parallel (no cross-lane file overlap):
-
-  Lane SRV  (pure src/* + scripts + cases — parallel with everything)
-    R1 provider seam ─▶ 0.1 ask outcome ─▶ 0.2 learned store (+precedence) ─▶ 0.4 source-leniency
-    (R1 first: shares adjudicate.ts)   R2/R3 provider config+robustness   └─▶ 0.6 eval cases
-    files: adjudicate.ts, providers/*(new), prompt.ts, types.ts, server.ts, config-store.ts,
-           decisions-store.ts(new), examples/cases.json, scripts/smoke.mjs, package.json(+openai)
-    note: R2's model picker touches extension/options.html/js — clear of the overlay files.
-
-    Help agent (Epic H, after R1):  H1 corpus ─▶ H2 /help route ─▶ H3 extension panel ─▶ H4 state tools
-    files: help/*(new), src/help.ts(new), server.ts, extension/popup|options.* ; H5 = Ledger repo
-
-  Lane EXT  (extension/* — starts after U1)
-    self-contained, start immediately:  S1, S2, S3   (border + sound + options; chrome.storage only)
-                                         F1, F2       (pause-clock + escalating opacity)
-    join point (needs Lane SRV 0.2 store):  0.3 clarify · 0.5 lever · 0.7 per-video · 0.8 rabbit-hole
-```
-
-**Rules for the map:**
-- **Cross-lane = fully parallel.** SRV touches only `src/*`, `scripts/`, `examples/`; EXT touches only
-  `extension/*`. Build the gatekeeper backbone and the extension UX at the same time.
-- **Within Lane EXT, serialize the shared files.** `background.js` and `content-guard.js` are edited by
-  many EXT tickets — land them one at a time (or as separate feature-scoped handler functions) to
-  avoid self-conflict. U1 exists specifically to keep the overlay code out of each other's way.
-- **Intra-Epic-0 order:** `0.1 → 0.2 → (0.3, 0.5, 0.7, 0.8)`; `0.4` and `0.6` any time after 0.2.
-- **Key-free vs. key-needed:** the store/precedence/source-leniency logic is unit-testable **without**
-  `ANTHROPIC_API_KEY`; exercising real `ask` verdicts needs the key via `npm run eval` (see "Blocked on
-  you"). So Lane SRV can be built and largely verified offline, keying only the final accuracy pass.
-- **After the early wave:** Epic A (plan queue) unblocks T and B (parallel), then C, then D — see the
-  `WORKLOAD_TICKETS.md` dependency line.
+**Build order that was followed:** `U → (R → {0, H}, S, F) → A → (T, B) → C → D`. (The detailed
+per-epic parallelization map that used to live here — which files each ticket touched, which lanes
+ran concurrently — is no longer forward-looking now that every epic is built; see `git log` on this
+file, or `WORKLOAD_TICKETS.md`, if that history is ever needed again.)
 
 ## Status
 
@@ -114,7 +69,12 @@ WAVE 1 — two lanes in parallel (no cross-lane file overlap):
   `LocalTemplateStore`, pure `expandTemplate` (slot binding, `repeat: N`, `until-end-of-day`),
   `liftPlanToTemplate` (save-current, parameterize projects→slots), `/templates` CRUD +
   `/plan/from-template`, popup slot-binding picker + save-as-template, options manager.
-  `npm run smoke` = **77/77** hermetic. 🖐 Phase A/T browser gates on PR #2. **Next: B → C → D.**
+  `npm run smoke` = **77/77** hermetic. 🖐 Phase A/T browser gates on PR #2.
+- **Epic D — Ledger-native store — DONE (2026-07-11).** `LedgerPlanStore`/`LedgerTemplateStore`
+  (Firestore, via new `ledger plan`/`ledger template` CLI verbs), `BULWORK_PLAN_BACKEND` switch,
+  `scripts/migrate-plan-to-ledger.mjs`. All five epics (A/T/B/C/D) now complete — the workload/day-
+  plan layer is done. See `SESSION_LOG.md`'s "Epic D" entry for full detail, including the one
+  documented divergence from `WORKLOAD_TICKETS.md`'s literal D1 wording.
 
 ## Resume / verify
 
@@ -132,9 +92,11 @@ npm run eval:corrections  # scores the adjudicator against YOUR recorded clarify
    options page) and `ANTHROPIC_API_KEY` (fallback path) are in `.env`; adjudication runs live.
 2. ~~**A browser**~~ — **RESOLVED.** Running in Chrome. (Per-site content-script tuning on live
    claude.ai / Gemini / ChatGPT is still worth doing, but it's no longer a blocker.)
-3. **Firestore creds + Ledger-app decision** — still open. This is **Epic D** (Ledger-native store)
-   and Phase 3 ("Focus UI in the Ledger app + session-as-Ledger-object") — editing the mature Ledger
-   React app and writing to its Firestore. Held deliberately, done last. **Grounded plans are ready:**
+3. ~~**Firestore creds + Epic D**~~ — **RESOLVED (2026-07-11).** `LEDGER_BIN` + ADC creds work
+   live; the workload plan/templates now have a Ledger-native (Firestore) backend, verified end to
+   end. Still open, separately: **Phase 3** ("Focus UI in the Ledger app + session-as-Ledger-object")
+   — a distinct piece of work editing the mature Ledger *React app* itself (not the CLI), and **H5**
+   (shared `help/` corpus into Ledger's own focus agent). **Grounded plans are ready:**
    `../ledger/docs/BULWORK_PHASE3_LEDGER_APP.md` (app + `FocusSession`; key gotcha `BRICK_USER_ID`) and
    `../ledger-cli/docs/FOCUS_COMMAND_PLAN.md` (`ledger focus` primitive).
 
@@ -158,21 +120,22 @@ src/
   tiers.ts           tier1/tier3 defaults + classify()
   config-store.ts    tier lists + BulworkSettings (model, focus tuning) — .data/*.json
   session.ts         Pomodoro/focus session state + JSONL log (+ Firestore stub) + refocus
-  plan-store.ts      PlanStore seam + LocalPlanStore + pure advancePlan (Epic A)
+  plan-store.ts      PlanStore seam + Local/LedgerPlanStore + pure advancePlan (Epic A/D)
   plan-runtime.ts    queue runtime: block↔session anchoring, budgets, steps, stateVersion (Epic A)
-  template-store.ts  TemplateStore + expandTemplate + liftPlanToTemplate (Epic T)
+  template-store.ts  TemplateStore + Local/LedgerTemplateStore + expandTemplate + liftPlanToTemplate
+                     (Epic T/D)
   help.ts            grounded /help Q&A: corpus retrieval + read-only state tools (Epic H)
   grounding.ts       Memory-Hub grounding (env-gated placeholder)
   server.ts          local HTTP service (:7373) — adjudicate/session/plan/templates/help/config
 help/*.md            curated help corpus (the help agent answers ONLY from these)
 extension/           MV3: manifest, background, overlay.js (U1 primitive), content-guard,
                      content-prepend, offscreen audio, popup (plans/templates), options, block page
-scripts/             smoke.mjs (hermetic self-test) + export-cases.mjs (corrections → eval cases)
+scripts/             smoke.mjs (hermetic self-test) + export-cases.mjs (corrections → eval cases) +
+                     migrate-plan-to-ledger.mjs (Epic D one-shot .data → Firestore migration)
 ```
 
-**Still-unbuilt (per `WORKLOAD_TICKETS.md`):**
+**Still-unbuilt (all `WORKLOAD_TICKETS.md` epics — U/R/0/H/S/F/A/T/B/C/D — are now complete):**
 ```
-Epic D only: `ledger plan …` CLI verbs (Ledger repo), LedgerPlanStore /
-LedgerTemplateStore behind the existing store seams, .data → Ledger migration.
-(src/watchers.ts, swap policy, advance mode, escalation + dispatcher all landed with B/C.)
+H5 (shared help/ corpus wired into Ledger's own focus agent) and a ledger-mcp wrapper for the new
+`ledger plan`/`ledger template` commands — both flagged as follow-ups, not gating anything here.
 ```

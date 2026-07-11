@@ -31,10 +31,17 @@ import {
   startPlan,
   toggleStep,
   undoAdvance,
+  usePlanStore,
 } from "./plan-runtime.js";
 import type { StartBlockInput } from "./plan-runtime.js";
-import { LocalTemplateStore, expandTemplate, liftPlanToTemplate } from "./template-store.js";
-import type { SlotBinding } from "./template-store.js";
+import { LedgerPlanStore } from "./plan-store.js";
+import {
+  LedgerTemplateStore,
+  LocalTemplateStore,
+  expandTemplate,
+  liftPlanToTemplate,
+} from "./template-store.js";
+import type { SlotBinding, TemplateStore } from "./template-store.js";
 import { getPlan } from "./plan-runtime.js";
 import type { ChatTurn } from "./providers/index.js";
 import type { FocusRef, GitPredicate, StopCondition, WorkflowTemplate } from "./types.js";
@@ -98,10 +105,17 @@ let tiers = await loadTiers();
 let decisions = await loadDecisions();
 // App settings (R2): the configurable adjudicator model lives here (.data/settings.json).
 let settings = await loadSettings();
+// Plan/template backend (Epic D): "local" (default, `.data/*.json`) or "ledger" (Firestore via the
+// `ledger plan`/`ledger template` CLI verbs — see plan-store.ts/template-store.ts). Deployment-time
+// choice, not a runtime toggle, matching LEDGER_BIN's own env-only convention.
+const PLAN_BACKEND = bulworkEnv("PLAN_BACKEND") ?? "local";
+if (PLAN_BACKEND === "ledger") usePlanStore(new LedgerPlanStore());
 // Plan layer (Epic A): re-hydrate a persisted mid-flight plan so the queue survives restarts.
+// Must run AFTER the backend switch above — restorePlan() reads through whichever store is active.
 await restorePlan();
-// Workflow templates (Epic T): CRUD store, local JSON now / Ledger-native later.
-const templates = new LocalTemplateStore();
+// Workflow templates (Epic T): CRUD store, local JSON now / Ledger-native later (Epic D).
+const templates: TemplateStore =
+  PLAN_BACKEND === "ledger" ? new LedgerTemplateStore() : new LocalTemplateStore();
 
 /** Resolve a fully-bound FocusRef to a FocusTask (explicit task, or Ledger project lookup). */
 async function focusFromRef(ref: FocusRef): Promise<FocusTask> {

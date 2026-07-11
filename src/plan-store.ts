@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import type { WorkBlock, WorkloadPlan } from "./types.js";
 import { bulworkEnv } from "./env.js";
+import { runLedger } from "./ledger.js";
 
 // The plan store (Epic A2). `PlanStore` is the seam Epic D swaps a Ledger-backed implementation
 // into; `LocalPlanStore` persists the identical Ledger-native shape to `.data/plan.json`.
@@ -118,6 +119,47 @@ export class LocalPlanStore implements PlanStore {
       await unlink(PLAN_PATH);
     } catch {
       /* may not exist — fine */
+    }
+  }
+}
+
+/** Ledger-backed store (Epic D2): the same Ledger-native shape, shelled through `ledger plan
+ *  show/set/clear --json` (`../../ledger-cli/internal/commands/plan.go`) instead of a local file.
+ *  `load()` fails open (swallow → null) — a transient Firestore/CLI hiccup must not crash
+ *  `restorePlan()` at service startup, matching `LocalPlanStore.load()`'s never-throws contract.
+ *  `save()`/`advance()` propagate errors — a write failure should surface as a 500, not vanish. */
+export class LedgerPlanStore implements PlanStore {
+  async load(): Promise<WorkloadPlan | null> {
+    try {
+      const stdout = await runLedger(["plan", "show", "--json"]);
+      const parsed: unknown = JSON.parse(stdout);
+      if (isPlan(parsed)) return parsed;
+    } catch {
+      /* CLI/Firestore hiccup or no plan yet → null, fail-open */
+    }
+    return null;
+  }
+
+  async save(p: WorkloadPlan): Promise<void> {
+    await runLedger(["plan", "set", "--json"], { stdin: JSON.stringify(p) });
+  }
+
+  async advance(blockId: string, how: "done" | "skipped"): Promise<WorkloadPlan> {
+    // No dedicated CLI verb: plan-runtime.ts never calls store.advance() (it drives mutation
+    // itself via the pure advancePlan() + store.save()) — this composes the same two primitives
+    // LocalPlanStore.advance() does, so the interface is satisfied without new Go surface.
+    const plan = await this.load();
+    if (!plan) throw new Error("no active plan");
+    const next = advancePlan(plan, blockId, how);
+    await this.save(next);
+    return next;
+  }
+
+  async clear(): Promise<void> {
+    try {
+      await runLedger(["plan", "clear", "--json"]);
+    } catch {
+      /* best-effort, matches LocalPlanStore.clear() */
     }
   }
 }

@@ -9,6 +9,7 @@ import type {
   WorkflowTemplate,
 } from "./types.js";
 import { bulworkEnv } from "./env.js";
+import { LedgerCliError, runLedger } from "./ledger.js";
 
 // Workflow templates (Epic T): CRUD over `.data/templates.json` behind a TemplateStore interface
 // (mirrors PlanStore — local now, Ledger-native later), plus the two pure workhorses:
@@ -63,6 +64,54 @@ export class LocalTemplateStore implements TemplateStore {
     await mkdir(DATA_DIR, { recursive: true });
     await writeFile(TEMPLATES_PATH, JSON.stringify(kept, null, 2), "utf8");
     return true;
+  }
+}
+
+// Matches exit.NotFound in ../../ledger-cli/internal/exit/exit.go — how `ledger template
+// show/delete` reports "no such id" (distinct from a real failure).
+const LEDGER_NOT_FOUND = 20;
+
+/** Ledger-backed store (Epic D2): one Firestore doc per template, shelled through `ledger template
+ *  list/show/set/delete --json` (`../../ledger-cli/internal/commands/template.go`). Reads fail
+ *  open (swallow → empty/null); `save()` propagates errors (write path fails loud); `remove()`
+ *  distinguishes NotFound from other failures via the CLI's exit code so a genuine outage surfaces
+ *  as a 500 rather than a silent 404 (see server.ts's `DELETE /templates/:id` handler). */
+export class LedgerTemplateStore implements TemplateStore {
+  async list(): Promise<WorkflowTemplate[]> {
+    try {
+      const stdout = await runLedger(["template", "list", "--json"]);
+      const parsed: unknown = JSON.parse(stdout);
+      if (Array.isArray(parsed)) return parsed.filter(isTemplate);
+    } catch {
+      /* CLI/Firestore hiccup → empty, fail-open */
+    }
+    return [];
+  }
+
+  async get(id: string): Promise<WorkflowTemplate | null> {
+    try {
+      const stdout = await runLedger(["template", "show", id, "--json"]);
+      const parsed: unknown = JSON.parse(stdout);
+      if (isTemplate(parsed)) return parsed;
+    } catch {
+      /* NotFound or any other hiccup → null, fail-open */
+    }
+    return null;
+  }
+
+  async save(t: WorkflowTemplate): Promise<WorkflowTemplate> {
+    await runLedger(["template", "set", t.id, "--json"], { stdin: JSON.stringify(t) });
+    return t;
+  }
+
+  async remove(id: string): Promise<boolean> {
+    try {
+      await runLedger(["template", "delete", id, "--json"]);
+      return true;
+    } catch (err) {
+      if (err instanceof LedgerCliError && err.code === LEDGER_NOT_FOUND) return false;
+      throw err; // a real outage should surface as a 500, not a silent "not found"
+    }
   }
 }
 

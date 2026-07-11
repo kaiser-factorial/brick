@@ -608,3 +608,73 @@ proving the hold survives, non-active-block-advance rejection, bad-budget reject
 enforcement via a real git condition, template/insert field round-trips, a pure unit test for
 `resolveModelForProvider`, and the youtu.be/enforceTab unit-derivation fixes exercised live.
 
+## Epic D — Ledger-native store (DONE, 2026-07-11)
+
+The last epic — the only one touching the mature Ledger app — promoting the plan/templates from
+local JSON to first-class Firestore objects behind the existing `PlanStore`/`TemplateStore` seams.
+No schema churn, as designed: `LedgerPlanStore`/`LedgerTemplateStore` are drop-in swaps for
+`LocalPlanStore`/`LocalTemplateStore`.
+
+**DIVERGENCE from `WORKLOAD_TICKETS.md`'s literal D1 wording** (`show/advance/step` CLI verbs): the
+actual `PlanStore` interface `plan-runtime.ts` drives only ever calls `store.load()`/`store.save()`
+— all mutation happens in pure TS (`advancePlan()`) and is persisted by handing the whole plan back
+to `save()`. So the CLI ended up a thin, schema-agnostic JSON store (`show`/`set`/`clear` — no
+`advance`/`step` verbs needed); `LedgerPlanStore.advance()` composes `load()` + the existing pure
+`advancePlan()` + `save()`, exactly mirroring `LocalPlanStore.advance()`. Less new Go code, no
+schema duplication in Go (ledger-cli treats plan/template payloads as opaque
+`map[string]interface{}` — the `WorkloadPlan`/`WorkflowTemplate` shape stays owned by `src/types.ts`
+and is never re-declared in Go), identical behavior.
+
+**D1 (`ledger-cli`):** `internal/client/firestore.go` — `GetPlan`/`SetPlan`/`ClearPlan` at the
+singleton `plans/current` doc (mirrors `.data/plan.json`: one active plan, no history yet), and
+`ListTemplates`/`GetTemplate`/`SetTemplate`/`DeleteTemplate` at `templates/<id>` (one doc per
+template, matching `LocalTemplateStore`'s list semantics — the local `MAX_TEMPLATES=100` array cap
+doesn't apply and is deliberately dropped for this backend). New `internal/commands/plan.go` +
+`template.go` (`NewPlanCmd()`/`NewTemplateCmd()`, following `NewConfigCmd()`'s nesting style):
+`ledger plan show/set/clear --json`, `ledger template list/show/set/delete --json`. `set` reads the
+full JSON body from **stdin** (not an arg — avoids shell quoting/length limits). **Exit-code
+convention, deliberately asymmetric:** `plan show` on an absent plan is exit **0** + JSON `null`
+(no plan is a valid state — mirrors the `ledger focus` precedent in
+`../ledger-cli/docs/FOCUS_COMMAND_PLAN.md`); `template show`/`delete` on a missing id is
+`exit.NotFound` (20) — an explicit id was supplied and got it wrong, matching
+`archive`/`restore`/`delete`'s existing convention. Documented in `ledger-cli/docs/CLI_COMMANDS.md`.
+
+**D2 (`bulwork`):** a shared `runLedger(args, {stdin?})` helper (`src/ledger.ts`) shells to
+`LEDGER_BIN`, piping stdin via the promisified `execFile`'s `.child.stdin` (Node's
+`promisify(execFile)` exposes the underlying `ChildProcess` on `.child`), and throws
+`LedgerCliError` carrying the CLI's exit code on a non-zero exit — needed so
+`LedgerTemplateStore.remove()` can distinguish NotFound (→ `false`, matching
+`LocalTemplateStore.remove()`'s contract that drives `DELETE /templates/:id`'s 404) from a genuine
+outage (→ propagate, surfaces as a 500 rather than a silent 404). `LedgerPlanStore`/
+`LedgerTemplateStore` (`plan-store.ts`/`template-store.ts`) follow the same fail-open-on-read /
+fail-loud-on-write split the local stores already established: `load()`/`list()`/`get()` swallow
+errors (a transient Firestore/CLI hiccup must not crash `restorePlan()` at service startup);
+`save()` propagates (a write failure should surface, not vanish). New `BULWORK_PLAN_BACKEND` env
+(`local` default | `ledger`, read via the existing `bulworkEnv()`) in `server.ts`, switched *before*
+`restorePlan()` runs so the restore reads through the right store; no runtime/UI toggle — a
+deployment choice like `LEDGER_BIN` itself.
+
+**Migration:** `scripts/migrate-plan-to-ledger.mjs` (`npm run migrate:plan`) replays
+`.data/plan.json`/`.data/templates.json` through the real `LedgerPlanStore`/`LedgerTemplateStore`
+(not a raw Firestore write), verifying each write by reading it back; non-destructive (never
+touches the local files); `--dry-run` supported.
+
+**Verification — all live, against real Firestore (`kaiser-ledger`) via the built `ledger` binary:**
+`go build ./... && go vet ./...` clean (pre-existing `wizard.go` vet warnings unrelated/untouched);
+`npm run typecheck && npm run build` clean; `npm run smoke` = **133/133** unchanged (the Ledger
+backend is intentionally outside the hermetic suite — Epic D was always a 🖐-gated phase). Live round
+trip of every new CLI verb (`plan show/set/clear`, `template list/show/set/delete`, including the
+exit-0-vs-NotFound distinction). Ran the actual service with `BULWORK_PLAN_BACKEND=ledger`: started
+a plan, toggled a step, confirmed each write via an independent `ledger plan show --json`; killed
+and restarted the service and confirmed `restorePlan()` re-hydrated the active block/session from
+Firestore; exercised `LedgerTemplateStore`'s full contract (list/get/save/remove, including the
+NotFound-vs-error distinction) directly through the compiled TS. Ran the real migration against the
+actual `.data/plan.json` (a finished plan with two skipped blocks) and confirmed it landed in
+Firestore losslessly; restored `plans/current` to that real data as the final step (the gate's own
+throwaway test plan was ended and doesn't linger).
+
+**The plan layer is now A ✓ T ✓ B ✓ C ✓ D ✓ — all five epics complete.** Not built: H5 (wiring the
+shared `help/` corpus into Ledger's own focus agent — a separate Ledger-app surface, not part of
+D1/D2's acceptance criteria) and a `ledger-mcp` wrapper for the two new commands — both flagged as
+natural follow-ups, not required for Epic D itself.
+

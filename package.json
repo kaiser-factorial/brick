@@ -19,6 +19,7 @@
     "eval:corrections": "npm run build && node scripts/export-cases.mjs .data/corrections.cases.json && tsx src/eval.ts .data/corrections.cases.json",
     "prepend": "tsx src/prepend-cli.ts",
     "serve": "tsx src/server.ts",
+    "migrate:plan": "npm run build && node scripts/migrate-plan-to-ledger.mjs",
     "smoke": "npm run build && node scripts/smoke.mjs"
   },
   "dependencies": {

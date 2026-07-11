@@ -241,6 +241,13 @@ async function watchTick(): Promise<void> {
       bump();
       await persist();
     }
+  } catch (err) {
+    // Review fix (code review pass): watchTick() runs fire-and-forget off a setInterval — with
+    // no catch here, a persist() failure (a real possibility now that Epic D's LedgerPlanStore
+    // can throw on a transient Firestore/network hiccup, unlike the local file store) becomes an
+    // unhandled rejection that can crash the whole process. Log and swallow instead: the next
+    // tick retries naturally, matching the evaluator-poll fail-open policy just above.
+    console.error("[bulwork] watchTick failed (will retry next tick):", err);
   } finally {
     tickInFlight = false;
   }
