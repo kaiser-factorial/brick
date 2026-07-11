@@ -24,7 +24,7 @@ per-video judging on YouTube + a rabbit-hole time nudge · "one more minute" gra
 work clock** (capped, escalating tint) · **day plans** (an ordered queue of blocks with budgets,
 steps, repeats) and **workflow templates** (save/re-run parameterized plans) · a grounded in-app
 **help agent** ("Ask about BULWORK") · an AI-chat focus-prepend pill. See
-`../ledger/docs/BRICK_MODE_PLAN.md` for the roadmap and `WORKLOAD_DESIGN.md` for the current
+`../ledger/docs/BULWORK_MODE_PLAN.md` for the roadmap and `WORKLOAD_DESIGN.md` for the current
 design.
 
 ## Setup

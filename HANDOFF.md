@@ -1,7 +1,7 @@
 # BULWORK MODE — handoff
 
 **What this is:** the focus-enforcement pillar of the Ledger project-OS. Spec + roadmap in
-`../ledger/docs/BRICK_MODE_PLAN.md`; chronological build log + divergences in `SESSION_LOG.md`.
+`../ledger/docs/BULWORK_MODE_PLAN.md`; chronological build log + divergences in `SESSION_LOG.md`.
 
 ---
 
@@ -135,7 +135,7 @@ npm run eval:corrections  # scores the adjudicator against YOUR recorded clarify
 3. **Firestore creds + Ledger-app decision** — still open. This is **Epic D** (Ledger-native store)
    and Phase 3 ("Focus UI in the Ledger app + session-as-Ledger-object") — editing the mature Ledger
    React app and writing to its Firestore. Held deliberately, done last. **Grounded plans are ready:**
-   `../ledger/docs/BRICK_PHASE3_LEDGER_APP.md` (app + `FocusSession`; key gotcha `BRICK_USER_ID`) and
+   `../ledger/docs/BULWORK_PHASE3_LEDGER_APP.md` (app + `FocusSession`; key gotcha `BRICK_USER_ID`) and
    `../ledger-cli/docs/FOCUS_COMMAND_PLAN.md` (`ledger focus` primitive).
 
 Note: a subagent security review hardened the service since first build — the local service now
